@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Construction Spending Monitor</title>
+<meta name="description" content="U.S. construction spending from the Census Bureau's monthly C30 release: housing, business structures and public works, and how the current cycle compares with past downturns.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (max 1180px). Header, education note, six summary tiles,
+   total chart, segment chart, drivers chart, then-vs-now chart, sector table, release log, glossary, footer. */
+:root {
+  --bg: #f2f4f7;          /* cool paper */
+  --card: #ffffff;
+  --fg: #141d27;
+  --muted: #5a6875;
+  --faint: #8b97a3;
+  --line: #d9dfe6;
+  --grid: #e8ecf0;
+  --s1: #2a78d6;          /* total, residential, current cycle */
+  --s2: #eb6834;          /* private nonresidential, 2006-10 bust */
+  --s3: #1baf7a;          /* public, 2001-02 dip */
+  --s4: #e87ba4;          /* 2020 dip */
+  --good: #1e7f3a; --bad: #c0392b;
+  --wash: rgba(42,120,214,.10);
+  --font-sans: "Libre Franklin", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  /* aliases used by the chart code */
+  --ink: var(--fg); --surface: var(--card); --axis: var(--line);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101519; --card: #181f26; --fg: #edf1f4; --muted: #a3afba; --faint: #76838f;
+    --line: #2b3640; --grid: #222b34; --s1: #3987e5; --s2: #e0602b; --s3: #199e70; --s4: #d55181;
+    --good: #4cc26a; --bad: #ef6b5c; --wash: rgba(57,135,229,.16);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101519; --card: #181f26; --fg: #edf1f4; --muted: #a3afba; --faint: #76838f;
+  --line: #2b3640; --grid: #222b34; --s1: #3987e5; --s2: #e0602b; --s3: #199e70; --s4: #d55181;
+  --good: #4cc26a; --bad: #ef6b5c; --wash: rgba(57,135,229,.16);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-sans); font-size: 14px; line-height: 1.45; margin: 0; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 48px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 15px; font-weight: 600; }
+.eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+.sub { color: var(--muted); font-size: 13px; }
+a { color: var(--s1); }
+header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
+header .sub { text-wrap: pretty; }
+.disclaimer { margin: -6px 0 16px; padding: 10px 14px; border-radius: 6px; background: #163a6b; color: #ffffff; font-size: 13px; text-wrap: pretty; }
+.disclaimer b { color: #ffffff; font-weight: 700; }
+header .meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); background: var(--card); }
+.pill b { color: var(--fg); font-weight: 600; }
+
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; align-content: start; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.tile .label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.tile .value { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.tile .delta { font-size: 12px; color: var(--muted); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; padding: 1px 7px; border-radius: 4px; width: fit-content; }
+.chip.up { color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); }
+.chip.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.chip.flat { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
+.sig { font-size: 11px; color: var(--muted); }
+
+section.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; margin-bottom: 16px; min-width: 0; }
+.card-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.card-head .sub { max-width: none; }
+.dek { color: var(--muted); font-size: 13px; margin: 4px 0 10px; text-wrap: pretty; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.two > section.card { margin-bottom: 0; }
+.cmpnote { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 28px; margin-bottom: 8px; }
+.cmpnote .dek { margin: 0; }
+.cmpnote b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { background: transparent; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 5px 10px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.seg button:focus-visible { outline: 2px solid var(--s1); outline-offset: -2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px; }
+.cyc { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px 3px 8px; font: inherit; font-size: 12px; background: var(--card); color: var(--fg); }
+button.cyc { cursor: pointer; }
+.cyc i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.cyc[aria-pressed="false"] { color: var(--faint); text-decoration: line-through; }
+.cyc[aria-pressed="false"] i { opacity: .3; }
+.cyc:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+.chart { position: relative; width: 100%; }
+.chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart text { font-family: var(--font-sans); font-size: 11px; fill: var(--muted); }
+.chart text.lbl { stroke: var(--card); stroke-width: 4px; paint-order: stroke; stroke-linejoin: round; }
+.tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); min-width: 170px; z-index: 2; }
+.tip .t { font-weight: 600; margin-bottom: 4px; }
+.tip .r { display: flex; justify-content: space-between; gap: 14px; font-variant-numeric: tabular-nums; }
+.tip .r i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; table-layout: fixed; }
+#sect { min-width: 540px; }
+th, td { padding: 6px 6px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+th:first-child, td:first-child { text-align: left; white-space: normal; }
+td.num { font-family: var(--font-mono); font-size: 12px; }
+tr.grp td { font-weight: 600; }
+.pos { color: var(--good); } .neg { color: var(--bad); }
+
+.log { display: flex; flex-direction: column; }
+.entry { display: grid; grid-template-columns: 150px 1fr; gap: 6px 18px; padding: 12px 0; border-top: 1px solid var(--grid); }
+.entry:first-child { border-top: none; padding-top: 2px; }
+.entry .when { font-family: var(--font-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.entry .when b { display: block; color: var(--fg); font-size: 13px; font-weight: 500; }
+.entry h3 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.entry ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+
+details.gloss summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--fg); }
+details.gloss summary:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+.gloss dl { margin: 12px 0 0; display: grid; grid-template-columns: minmax(150px, 210px) 1fr; gap: 10px 20px; font-size: 13px; }
+.gloss dt { font-weight: 600; }
+.gloss dd { margin: 0; color: var(--muted); }
+
+summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
+footer p { margin: 4px 0; }
+footer .srcs ul { margin: 4px 0 0; padding-left: 18px; columns: 2; column-gap: 32px; }
+footer .srcs li { break-inside: avoid; margin-bottom: 2px; }
+
+@media (max-width: 980px) {
+  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .two { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .tile { padding: 12px; }
+  .tile .value { font-size: 22px; }
+  .tile .delta { font-size: 11px; text-wrap: balance; }
+  .chip { font-size: 11.5px; }
+  section.card { padding: 12px 12px; }
+  .cmpnote { grid-template-columns: 1fr; }
+  .entry { grid-template-columns: 1fr; }
+  .gloss dl { grid-template-columns: 1fr; gap: 2px; }
+  .gloss dd { margin-bottom: 10px; }
+  footer .srcs ul { columns: 1; }
+}
+@media (prefers-reduced-motion: no-preference) { .seg button { transition: background .15s, color .15s; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div>
+    <div class="eyebrow">U.S. Census Bureau · Value of Construction Put in Place (C30)</div>
+    <h1>Construction Spending Monitor</h1>
+    <div class="sub">Monthly U.S. construction spending: housing, business structures and public works, what is driving the change, and how this cycle compares with past downturns.</div>
+  </div>
+  <div class="meta">
+    <span class="pill">Data <b id="asof"></b></span>
+    <span class="pill">Released <b id="released"></b></span>
+    <span class="pill">Next <b id="next"></b></span>
+    <a class="pill" href="https://www.census.gov/construction/c30/current/index.html" target="_blank" rel="noopener">Source: Census C30 ↗</a>
+  </div>
+</header>
+
+<p class="disclaimer"><b>For education only. Not financial advice.</b> Figures come from public government sources and are checked, but may contain errors. Check the original source before relying on it.</p>
+
+<div id="app"></div>
+
+<footer>
+  <p><strong>Reading it.</strong> All figures are seasonally adjusted annual rates in current dollars, not adjusted for inflation. Monthly changes marked “n.s.” are not statistically significant: their Census 90% confidence interval includes zero. The latest month is preliminary and is revised in the next two releases. Census also revises older months in an annual revision.</p>
+  <details class="srcs"><summary>Sources (5)</summary>
+    <ul>
+      <li><a href="https://www.census.gov/construction/c30/current/index.html" target="_blank" rel="noopener">Census, Construction Spending, current release</a></li>
+      <li><a href="https://www.census.gov/construction/c30/pdf/release.pdf" target="_blank" rel="noopener">Census, release tables (Table 1, seasonally adjusted)</a></li>
+      <li><a href="https://www.census.gov/construction/c30/historical_data.html" target="_blank" rel="noopener">Census, monthly time series (total, private, public)</a></li>
+      <li><a href="https://www.census.gov/construction/c30/definitions.html" target="_blank" rel="noopener">Census, C30 definitions</a></li>
+      <li><a href="https://fred.stlouisfed.org/series/TTLCONS" target="_blank" rel="noopener">FRED, TTLCONS and related series (cross-check)</a></li>
+    </ul>
+  </details>
+  <p id="logNote"><strong>Data check log.</strong> Explanations audited Oct 18, 2026; 10 sentences corrected (segment and driver chart intros, Then vs. now intro, glossary, footer). Next audit Nov 18, 2026.</p>
+  <p id="foot-note"></p>
+</footer>
+
+</div>
+
+<script>
+// ===== DATA BLOCKS (rewritten by scripts/update.py; one line each) =====
+const DATA = {"months":[["2022-01",1807763,913096,532787,361880,97509],["2022-02",1842072,933905,542113,366054,99889],["2022-03",1877402,956911,549284,371207,103706],["2022-04",1913147,968119,569383,375645,111085],["2022-05",1923964,976620,577187,370158,115492],["2022-06",1920269,955222,585925,379121,116021],["2022-07",1923856,931116,604904,387836,126354],["2022-08",1918061,915965,609720,392376,127534],["2022-09",1917890,896034,628279,393577,138747],["2022-10",1914367,886686,633579,394101,140746],["2022-11",1919538,873088,649673,396777,152488],["2022-12",1926876,859107,663906,403864,158606],["2023-01",1957618,853653,692679,411286,171641],["2023-02",1971178,846931,705057,419190,178626],["2023-03",2000432,849744,719951,430737,186920],["2023-04",2028917,851416,739944,437556,198793],["2023-05",2053902,859643,744075,450183,197205],["2023-06",2074232,867410,748961,457862,200404],["2023-07",2083615,878690,750507,454418,201682],["2023-08",2108452,880985,763653,463813,206082],["2023-09",2117176,878008,767476,471692,204657],["2023-10",2139594,882716,778593,478285,218447],["2023-11",2170325,894367,789883,486076,226521],["2023-12",2174846,892203,791368,491274,229932],["2024-01",2191633,914983,788246,488404,233135],["2024-02",2220925,931576,791119,498230,234617],["2024-03",2214113,925783,795690,492640,237892],["2024-04",2220689,932703,786264,501722,241693],["2024-05",2232845,941013,789040,502793,242393],["2024-06",2238643,941035,799022,498586,247995],["2024-07",2240441,934361,796738,509341,247030],["2024-08",2245978,927519,802435,516024,248760],["2024-09",2263103,943027,802283,517792,249116],["2024-10",2263823,936624,797492,529707,245317],["2024-11",2262637,924911,807746,529980,248954],["2024-12",2258822,928730,804706,525387,240906],["2025-01",2261053,927455,803294,530305,236433],["2025-02",2265811,927994,805729,532088,236203],["2025-03",2256260,920153,795337,540770,226015],["2025-04",2263809,913633,806145,544031,226249],["2025-05",2244426,913616,790988,539823,222469],["2025-06",2237719,920447,782127,535146,218322],["2025-07",2242633,927091,781119,534423,214353],["2025-08",2242024,926942,780447,534635,209798],["2025-09",2245799,931223,773148,541429,203744],["2025-10",2241141,921719,776782,542640,201570],["2025-11",2220726,916058,764064,540604,194125],["2025-12",2215955,930361,750768,534827,180751],["2026-01",2195636,912191,748601,534845,183241],["2026-02",2189683,907431,747319,534933,180864],["2026-03",2199399,918206,745125,536069,178488],["2026-04",2168231,882091,745266,540874,175033],["2026-05",2168396,874705,749441,544250,171381],["2026-06",2187350,882120,758852,546378,168924],["2026-07",2184474,872707,764979,546788,168220],["2026-08",2203129,882270,773010,547849,168209]],"latest":{"moe":{"nonres":true,"pub":false,"res":false,"total":false},"month":"2026-08","next":"Nov 2, 2026 (Sep data)","released":"Oct 1, 2026","sectorNote":"Selected categories from the August release. Census counts data centers under Office, which is why it is the fastest-growing line.","sectors":[{"cur":773010,"group":true,"name":"Private nonresidential","prev":764979,"yago":780447},{"cur":168209,"name":"Manufacturing","prev":168220,"yago":209798},{"cur":165900,"name":"Power","prev":164453,"yago":151277},{"cur":134119,"name":"Office (incl. data centers)","prev":128199,"yago":103300},{"cur":116448,"name":"Commercial","prev":116516,"yago":123038},{"cur":547849,"group":true,"name":"Public","prev":546788,"yago":534635},{"cur":150610,"name":"Highway and street","prev":150505,"yago":144279},{"cur":113073,"name":"Educational","prev":112939,"yago":111676}],"status":"preliminary","ytd":{"cur":1450.4,"label":"Jan–Aug 2026 vs Jan–Aug 2025","prior":1496.6}}};
+const NOTES = [{"id":"2026-07","headline":"Slow nominal decline continues; housing leads it down, office/data centers and power offset","points":["Total $2,157.6B SAAR, −0.5% m/m (not significant), −3.8% y/y and −3.5% YTD (both significant). Real decline is larger, since these are current dollars.","Private residential −1.3% m/m to $859.0B, down ~7% y/y; now the main drag.","Private nonresidential +0.4% m/m, the only rising segment. Office (incl. data centers) +21% y/y and power +7% y/y are offsetting manufacturing, which is −22% y/y as the factory boom unwinds.","Public flat at $543.4B. Not cushioning the private slowdown.","Watch: whether private nonresidential rolls over. That would turn a housing-led grind into a broad downturn."],"released":"Sep 1, 2026"},{"id":"2026-08","headline":"Big upward revisions erase the summer slide; office/data centers keep nonresidential rising","points":["Total $2,203.1B SAAR, +0.9% m/m (not significant), −1.7% y/y (significant) and −3.1% YTD ($1,450.4B vs $1,496.6B). Nominal dollars, so the real decline is larger.","Revisions are the story: June revised up $19.7B and July up $26.9B, mostly housing. July now reads $2,184.5B instead of $2,157.6B, so the 'slow grind down' looks flatter than it did a month ago.","Private nonresidential +1.0% m/m to $773.0B (the only significant move). Office incl. data centers +4.6% m/m and +30% y/y; power +10% y/y. Manufacturing flat m/m and −20% y/y, but its decline is slowing.","Residential +1.1% m/m (not significant), still −4.8% y/y; public +0.2% m/m (not significant), +2.5% y/y.","Vs the 2006–10 bust: 18 months after the Feb 2025 peak, total spending is at 97.2 (peak = 100) vs 96.1 at the same point after the Feb 2006 peak — a slightly milder path. Watch whether the housing revisions hold in the next release."],"released":"Oct 1, 2026"}];
+const HIST = {"bust2006":{"label":"2006–10 bust","nonres":[250158,251796,251961,254161,255438,252025,253900,257599,263183,265451,269373,272395,277343,280283,285365,287651,292927,299334,301402,306563,307094,304567,312164,320162,320249,332339,340354,345178,358048,369495,370632,384672,395532,408729,402136,401961,414958,411129,406437,411413,414316,408045,411470,403794,410624,412323,405596,393186,381677,382404,383667,369627,365757,354227,344704,334891,322235,308583,299917,286479,268992,267569,267614,267185,264485,264369,252883,255187,253420,257733,265154,257397],"pub":[220274,226618,228202,228516,234195,236913,236450,237852,237879,236787,237341,241758,242619,246794,251494,255257,253839,257741,258037,254884,254781,256903,260614,270232,280098,275052,278405,281745,289401,288080,288841,293431,297339,295943,298893,296694,294251,299323,306539,304512,305320,307558,310609,313684,308559,314332,316897,311957,309552,321367,325481,318896,317075,320961,322593,314453,310870,307866,302635,300330,298296,292195,300311,307905,306066,307056,302457,308148,316474,307128,301529,292968],"res":[575650,588435,591580,598335,603707,616958,628750,633710,647374,658590,665376,670522,675679,678562,668311,650388,633815,615053,598487,584460,573878,561444,548971,545011,537571,531641,527865,523666,514131,505936,495976,480974,465709,447819,431878,416486,402138,386197,390471,385328,381911,374495,364873,352598,340396,329304,312540,293997,283870,267938,254645,243958,237188,237343,244141,250768,254135,254942,255941,255801,254826,255121,253924,254574,252896,250518,244354,238695,237834,236512,237468,239030],"start":"2005-01","total":[1046082,1066848,1071745,1081012,1093341,1105896,1119101,1129163,1148438,1160831,1172090,1184677,1195642,1205639,1205169,1193296,1180581,1172128,1157926,1145907,1135753,1122914,1121749,1135406,1137917,1139032,1146624,1150590,1161581,1163511,1155448,1159077,1158580,1152491,1132908,1115141,1111347,1096648,1103446,1101252,1101547,1090098,1086952,1070075,1059579,1055959,1035033,999139,975099,971708,963793,932482,920020,912530,911438,900112,887241,871391,858493,842609,822114,814885,821849,829664,823447,821943,799694,802030,807728,801372,804151,789395]},"covid2020":{"label":"2020 COVID","peak":"2020-03","start":"2019-06","total":[1381377,1413022,1425986,1438191,1445140,1464880,1469334,1491169,1498377,1501676,1458956,1448816,1461054,1474614,1490027,1512535,1538282,1552457,1577505,1598697,1574677,1609846,1614358,1626557,1640276,1661524,1665413,1673533,1688747,1731869,1762351]},"dotcom2001":{"label":"2001–02 dot-com","peak":"2002-02","start":"2001-01","total":[814479,813647,828057,842392,848146,855730,850471,847465,837412,845941,843911,849689,858654,862338,844551,858240,850935,846777,847129,839008,832134,839690,844697,855921,863855,859225,851132,859459,866814,880865,891264,901839,911589,925732,925985,948491]}};
+// ===== END DATA BLOCKS =====
+
+// ---- Page logic. Everything below is drawn from DATA, NOTES and HIST. ----
+const months=DATA.months.map(r=>({id:r[0],total:r[1],res:r[2],nonres:r[3],pub:r[4],mfg:r[5]})).sort((a,b)=>a.id<b.id?-1:1);
+const latest=DATA.latest;
+const notes=NOTES.slice().sort((a,b)=>a.id<b.id?1:-1);
+const CYC={bust2006:{color:'--s2',order:1},dotcom2001:{color:'--s3',order:2},covid2020:{color:'--s4',order:3}};
+const hist=Object.entries(HIST).map(([id,v])=>({id,...v})).sort((a,b)=>(CYC[a.id]?.order??9)-(CYC[b.id]?.order??9));
+let range='all',cmp='total',zoom='near',cycOff={},glossOpen=false,lastW=0,rt=0;
+const app=document.getElementById('app');
+const fmtB=v=>'$'+(v/1000).toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:1})+'B';
+const fmtT=v=>'$'+(v/1e6).toFixed(2)+'T';
+const pct=(a,b)=>(a/b-1)*100;
+const sgn=p=>(p>0?'+':'')+p.toFixed(1)+'%';
+const cls=p=>Math.abs(p)<0.05?'flat':p>0?'up':'down';
+const arrow=p=>Math.abs(p)<0.05?'■':p>0?'▲':'▼';
+const mLabel=id=>{const [y,m]=id.split('-');return new Date(+y,+m-1,1).toLocaleString('en-US',{month:'short',year:'numeric'})};
+const mShort=id=>{const [y,m]=id.split('-');return new Date(+y,+m-1,1).toLocaleString('en-US',{month:'short'})+" ’"+y.slice(2)};
+
+function render(){
+  const L=months[months.length-1], P=months[months.length-2];
+  const Y=months.find(m=>m.id===(+L.id.slice(0,4)-1)+L.id.slice(4));
+  document.getElementById('asof').textContent=mLabel(L.id)+(latest.status?' ('+latest.status+')':'');
+  document.getElementById('released').textContent=latest.released||'';
+  document.getElementById('next').textContent=latest.next||'';
+
+  const k=(lbl,v,p,sub,sig)=>`<div class="tile"><span class="label">${lbl}</span><span class="value">${v}</span>
+    <span class="chip ${cls(p)}">${arrow(p)} ${sgn(p)}${sig?` <span class="sig">${sig}</span>`:''}</span><span class="delta">${sub}</span></div>`;
+  const moe=latest.moe||{};
+  const sigTag=key=>moe[key]==null?'':(moe[key]?'':'n.s.');
+  let html=`<div class="tiles">
+    ${k('Total spending',fmtT(L.total),pct(L.total,P.total),'vs '+mShort(P.id),sigTag('total'))}
+    ${k('Year over year',Y?sgn(pct(L.total,Y.total)):'—',Y?pct(L.total,Y.total):0,Y?'vs '+fmtT(Y.total)+' in '+mShort(Y.id):'','')}
+    ${latest.ytd?k('Year to date',fmtT(latest.ytd.cur*1000),pct(latest.ytd.cur,latest.ytd.prior),latest.ytd.label||'vs same period last year',''):''}
+    ${k('Private residential',fmtB(L.res),pct(L.res,P.res),(L.res/L.total*100).toFixed(0)+'% of total',sigTag('res'))}
+    ${k('Private nonresidential',fmtB(L.nonres),pct(L.nonres,P.nonres),(L.nonres/L.total*100).toFixed(0)+'% of total',sigTag('nonres'))}
+    ${k('Public',fmtB(L.pub),pct(L.pub,P.pub),(L.pub/L.total*100).toFixed(0)+'% of total',sigTag('pub'))}
+  </div>`;
+
+  html+=`<section class="card"><div class="card-head"><h2>Total construction spending</h2>
+    <div class="seg" role="group" aria-label="Time range">
+      ${['1y','2y','all'].map(r=>`<button type="button" data-r="${r}" aria-pressed="${range===r}">${r==='all'?'All':r.toUpperCase()}</button>`).join('')}
+    </div></div>
+    <p class="dek">Monthly, seasonally adjusted annual rate. Peak so far: <span id="peak"></span></p>
+    <div class="chart" id="c-total"></div></section>`;
+
+  html+=`<div class="two">
+    <section class="card"><h2>By segment</h2><p class="dek">Where the dollars are going. Each line is a segment’s spending in dollars, at a seasonally adjusted annual rate. The three lines add up to the total.</p>
+      <div class="legend">
+        <span><i style="background:var(--s1)"></i>Private residential</span>
+        <span><i style="background:var(--s2)"></i>Private nonresidential</span>
+        <span><i style="background:var(--s3)"></i>Public</span></div>
+      <div class="chart" id="c-seg"></div></section>
+    <section class="card"><h2>What’s driving the change</h2><p class="dek">Year-over-year change in total spending, split by segment. Each bar is a segment’s change in points of the total. Bars below zero pull the total down and bars above zero push it up. The dot is the net change, the sum of the bars.</p>
+      <div class="legend">
+        <span><i style="background:var(--s1)"></i>Residential</span>
+        <span><i style="background:var(--s2)"></i>Nonresidential</span>
+        <span><i style="background:var(--s3)"></i>Public</span>
+        <span><i style="background:var(--fg);width:8px;height:8px;border-radius:50%"></i>Net YoY</span></div>
+      <div class="chart" id="c-yoy"></div></section>
+  </div>`;
+
+  const avail=hist.filter(h=>Array.isArray(h[cmp]));
+  html+=`<section class="card"><div class="card-head"><h2>Then vs. now</h2>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Series to compare">
+        <button type="button" data-c="total" aria-pressed="${cmp==='total'}">Total</button>
+        <button type="button" data-c="res" aria-pressed="${cmp==='res'}">Residential</button>
+      </div>
+      <div class="seg" role="group" aria-label="Time span">
+        <button type="button" data-z="near" aria-pressed="${zoom==='near'}">First 2 years</button>
+        <button type="button" data-z="all" aria-pressed="${zoom==='all'}">Full bust</button>
+      </div></div></div>
+    <div class="cmpnote"><p class="dek"><b>How to read</b>Spending indexed to its peak (peak = 100), by months since the peak (x-axis). The dot-com and COVID lines end when spending got back to its peak. The 2006–10 line ends with the data in Dec 2010, still 34.5% below its peak.</p>
+    <p class="dek"><b>At the latest month</b><span id="cmp-read"></span></p></div>
+    <div class="chips" role="group" aria-label="Cycles shown">
+      <span class="cyc"><i style="background:var(--s1)"></i><span id="lg-now">Current cycle</span></span>
+      ${avail.map(h=>`<button type="button" class="cyc" data-y="${h.id}" aria-pressed="${!cycOff[h.id]}"><i style="background:var(${CYC[h.id]?.color||'--muted'})"></i>${esc(h.label||h.id)}</button>`).join('')}
+    </div>
+    <div class="chart" id="c-cmp"></div>
+    ${cmp==='res'&&avail.length<hist.length?'<p class="dek" style="margin:6px 0 0">Residential data is loaded for the 2006–10 bust only.</p>':''}
+  </section>`;
+
+  if(latest.sectors?.length){
+    html+=`<section class="card"><h2>Sector detail, ${mLabel(L.id)}</h2><p class="dek">${esc(latest.sectorNote||'Selected categories from the latest release. Census counts data centers under Office.')}</p>
+    <div class="tablewrap"><table id="sect"><colgroup><col style="width:36%"><col style="width:16%"><col style="width:14%"><col style="width:14%"><col style="width:20%"></colgroup>
+    <thead><tr><th>Category</th><th>${mShort(L.id)}</th><th>MoM</th><th>YoY</th><th>Year-ago</th></tr></thead><tbody>
+    ${latest.sectors.map(s=>{const mm=pct(s.cur,s.prev),yy=pct(s.cur,s.yago);return `<tr class="${s.group?'grp':''}"><td>${esc(s.name)}</td><td class="num">${fmtB(s.cur)}</td>
+      <td class="num ${mm>=0?'pos':'neg'}">${sgn(mm)}</td><td class="num ${yy>=0?'pos':'neg'}">${sgn(yy)}</td><td class="num">${fmtB(s.yago)}</td></tr>`}).join('')}
+    </tbody></table></div></section>`;
+  }
+
+  if(notes.length){
+    html+=`<section class="card"><h2>Release log</h2><p class="dek">Read on each monthly release, newest first.</p><div class="log">
+    ${notes.map(n=>`<div class="entry"><div class="when"><b>${mLabel(n.id)}</b>${n.released?'Released '+esc(n.released):''}${n.auto?'<br>Automatic summary':''}</div>
+      <div><h3>${esc(n.headline||'')}</h3><ul>${(n.points||[]).map(p=>`<li>${esc(p)}</li>`).join('')}</ul></div></div>`).join('')}
+    </div></section>`;
+  }
+
+  html+=`<section class="card"><details class="gloss" id="gloss"${glossOpen?' open':''}><summary>What these categories mean</summary><dl>
+    <dt>Total construction spending</dt><dd>The dollar value of construction work actually done each month: new structures plus improvements (additions, alterations, major replacements). Excludes maintenance and repairs, land, and production machinery and equipment (in data centers, the racks and servers). Shown as a seasonally adjusted annual rate: one month’s pace, annualized.</dd>
+    <dt>Private residential</dt><dd>Privately owned housing: new single-family homes (the largest piece), new multifamily buildings, and improvements to existing homes. It led the 2006–10 bust: it peaked first (Feb 2006) and fell furthest, 65% by late 2010.</dd>
+    <dt>Private nonresidential</dt><dd>Privately owned structures that aren’t housing. Manufacturing (factories, chip fabs, battery plants); Office, where Census also counts data centers; Commercial (retail, warehouses); Power (generation, transmission, pipelines); plus lodging, healthcare, private education and others. In the 2006–10 bust it peaked almost two years after housing (Jan 2008 vs Feb 2006). In this cycle it also peaked later than housing; the segment chart shows when.</dd>
+    <dt>Public</dt><dd>Owned by federal, state or local governments during construction. Highways and streets are the largest part, then schools, water and sewer, and transportation. Paid for from government budgets, not private financing. Since private spending turned down in 2025, public spending has grown year over year in most months (Mar–Apr 2026 were small dips).</dd>
+    <dt>Current vs. real dollars</dt><dd>All figures are nominal, not adjusted for inflation. Flat spending while material and labor costs rise means less actual building.</dd>
+    <dt>“n.s.” (not significant)</dt><dd>Census publishes a 90% confidence interval with each monthly change. “n.s.” means the change could plausibly be zero, so trends over several months matter more than any single print.</dd>
+    <dt>Indexed to peak</dt><dd>Each line is divided by its own cycle peak and multiplied by 100, so 95 means 5% below the peak. This lets cycles of very different dollar size be compared directly. The dot-com and COVID lines stop at the month spending got back to its peak. The 2006–10 line stops where its data ends, Dec 2010.</dd>
+  </dl></details></section>`;
+
+  app.innerHTML=html;
+  document.getElementById('gloss').addEventListener('toggle',e=>{glossOpen=e.target.open});
+  app.querySelectorAll('button[data-r]').forEach(b=>b.onclick=()=>{range=b.dataset.r;try{localStorage.setItem('csm-range',range)}catch(e){};render()});
+  app.querySelectorAll('button[data-c]').forEach(b=>b.onclick=()=>{cmp=b.dataset.c;render()});
+  app.querySelectorAll('button[data-z]').forEach(b=>b.onclick=()=>{zoom=b.dataset.z;try{localStorage.setItem('csm-zoom',zoom)}catch(e){};render()});
+  app.querySelectorAll('button[data-y]').forEach(b=>b.onclick=()=>{cycOff[b.dataset.y]=!cycOff[b.dataset.y];render()});
+  const pk=months.reduce((a,b)=>b.total>a.total?b:a);
+  document.getElementById('peak').textContent=fmtT(pk.total)+' in '+mLabel(pk.id)+(pk.id===L.id?' · now at the peak':' · now '+Math.abs(pct(L.total,pk.total)).toFixed(1)+'% below');
+  const sub=range==='all'?months:months.slice(-(range==='1y'?13:25));
+  lineChart('c-total',sub,[{key:'total',color:'--s1',name:'Total',area:true}]);
+  lineChart('c-seg',sub,[{key:'res',color:'--s1',name:'Residential'},{key:'nonres',color:'--s2',name:'Nonresidential'},{key:'pub',color:'--s3',name:'Public'}]);
+  const yoy=[];months.forEach((m,i)=>{if(i<12)return;const b=months[i-12];
+    yoy.push({id:m.id,v:pct(m.total,b.total),res:(m.res-b.res)/b.total*100,nonres:(m.nonres-b.nonres)/b.total*100,pub:(m.pub-b.pub)/b.total*100})});
+  contribChart('c-yoy',range==='all'?yoy:yoy.slice(-(range==='1y'?13:25)));
+  cmpChart();
+  lastW=document.getElementById('c-total')?.clientWidth||0;
+}
+window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(()=>{const c=document.getElementById('c-total');if(c&&Math.abs(c.clientWidth-lastW)>40)render()},150)});
+
+function cmpChart(){
+  const key=cmp, el=document.getElementById('c-cmp');
+  const ym=(start,i)=>{const [y,m]=start.split('-').map(Number);const d=new Date(y,m-1+i,1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')};
+  // current cycle: from its own high
+  const now=months.map(m=>({id:m.id,v:m[key]}));let pi=0;now.forEach((d,i)=>{if(d.v>now[pi].v)pi=i});
+  const A={peak:now[pi],pts:now.slice(pi).map((d,j)=>({k:j,id:d.id,v:d.v/now[pi].v*100}))};
+  // past cycles: from stated peak month (or the series high), ending when spending regained the peak
+  const past=hist.filter(h=>Array.isArray(h[key])&&!cycOff[h.id]).map(h=>{
+    const arr=h[key].map((v,i)=>({id:ym(h.start,i),v}));
+    let p=h.peak?arr.findIndex(d=>d.id===h.peak):-1;
+    if(p<0||key!=='total'){p=0;arr.forEach((d,i)=>{if(d.v>arr[p].v)p=i})}
+    let pts=arr.slice(p).map((d,j)=>({k:j,id:d.id,v:d.v/arr[p].v*100}));
+    const back=pts.findIndex((d,j)=>j>0&&d.v>=100);
+    if(back>0)pts=pts.slice(0,back+1);
+    return {id:h.id,label:h.label||h.id,color:CYC[h.id]?.color||'--muted',peak:arr[p],pts,back:back>0?back:null};
+  });
+  const aE=A.pts[A.pts.length-1];
+  const fullK=Math.max(aE.k,...past.map(c=>c.pts.length-1),12);
+  const maxK=zoom==='near'?Math.min(fullK,Math.max(24,Math.ceil((aE.k+3)/6)*6)):fullK;
+  const vis=P=>P.filter(p=>p.k<=maxK);
+  const allv=[...vis(A.pts),...past.flatMap(c=>vis(c.pts))].map(p=>p.v);
+  const top=Math.max(100,...allv);let ticks=nice(Math.min(...allv),top,5);const lo=ticks[0],hi=top+(top-lo)*.04;ticks=ticks.filter(t=>t<=hi);
+  const W=cw(el),H=ch(W,290),m={l:40,r:20,t:14,b:30},iw=W-m.l-m.r,ih=H-m.t-m.b;
+  const x=k=>m.l+k*iw/maxK, y=v=>m.t+ih-(v-lo)/(hi-lo)*ih;
+  let g=ticks.map(t=>`<line x1="${m.l}" x2="${W-m.r}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/><text x="${m.l-8}" y="${y(t)+3.5}" text-anchor="end">${t}</text>`).join('');
+  g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${y(100)}" y2="${y(100)}" stroke="var(--axis)" stroke-dasharray="4 3"/>`;
+  const step=maxK<=30?6:12;for(let k=0;k<=maxK;k+=step)g+=`<text x="${x(k)}" y="${H-10}" text-anchor="middle">${k}</text>`;
+  const path=(P,c,w)=>P.length<2?'':`<path d="M${P.map(p=>x(p.k).toFixed(1)+','+y(p.v).toFixed(1)).join('L')}" fill="none" stroke="var(${c})" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"/>`;
+  past.forEach(c=>{const P=vis(c.pts);g+=path(P,c.color,2);const e=P[P.length-1];
+    if(e&&e.k===c.pts.length-1)g+=`<circle cx="${x(e.k)}" cy="${y(e.v)}" r="3.5" fill="var(${c.color})" stroke="var(--surface)" stroke-width="2"/>`;});
+  g+=path(A.pts,'--s1',2.5);
+  g+=`<circle cx="${x(aE.k)}" cy="${y(aE.v)}" r="4.5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"/>`;
+  const right=x(aE.k)>W-110;
+  g+=`<text x="${x(aE.k)+(right?-8:8)}" y="${y(aE.v)+(aE.v>99?16:-9)}" text-anchor="${right?'end':'start'}" class="lbl" style="fill:var(--ink);font-weight:500">Now ${aE.v.toFixed(1)}</text>`;
+  const bust=past.find(c=>c.id==='bust2006');
+  if(bust&&zoom==='all'){const bE=bust.pts[bust.pts.length-1];g+=`<text x="${x(bE.k)}" y="${y(bE.v)+16}" text-anchor="end" class="lbl">${mShort(bE.id)}: ${bE.v.toFixed(1)}</text>`;}
+  g+=`<line id="c-cmp-x" y1="${m.t}" y2="${m.t+ih}" stroke="var(--axis)" stroke-dasharray="3 3" visibility="hidden"/><circle id="c-cmp-d0" r="4.5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`;
+  g+=past.map((c,j)=>`<circle id="c-cmp-p${j}" r="4" fill="var(${c.color})" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`).join('');
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Current cycle against past downturns, indexed to peak">${g}<rect x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/></svg><div class="tip" hidden></div>`;
+  document.getElementById('lg-now').textContent='Current cycle (peak '+mShort(A.peak.id)+')';
+  const parts=past.map(c=>{const p=c.pts[aE.k];
+    return p?`${c.label}: ${p.v.toFixed(1)}`:(c.back?`${c.label}: back at its peak by month ${c.back}`:`${c.label}: no data that far out`)});
+  document.getElementById('cmp-read').textContent=`At month ${aE.k}, now is at ${aE.v.toFixed(1)}.`+(parts.length?' '+parts.join('. ')+'.':'');
+  hover(el,'c-cmp',maxK+1,x,W,k=>{
+    const a=A.pts[k];const xl=document.getElementById('c-cmp-x');xl.setAttribute('x1',x(k));xl.setAttribute('x2',x(k));
+    const d0=document.getElementById('c-cmp-d0');d0.setAttribute('r',a?4.5:0);if(a){d0.setAttribute('cx',x(k));d0.setAttribute('cy',y(a.v))}
+    let rows=a?`<div class="r"><span><i style="background:var(--s1)"></i>Now (${mShort(a.id)})</span><b>${a.v.toFixed(1)}</b></div>`:'';
+    past.forEach((c,j)=>{const p=c.pts[k],d=document.getElementById('c-cmp-p'+j);d.setAttribute('r',p?4:0);
+      if(p){d.setAttribute('cx',x(k));d.setAttribute('cy',y(p.v));rows+=`<div class="r"><span><i style="background:var(${c.color})"></i>${c.label.replace(/^\S+\s/,'')} (${mShort(p.id)})</span><b>${p.v.toFixed(1)}</b></div>`}});
+    return `<div class="t">Month ${k} after peak</div>`+rows;
+  },['c-cmp-x','c-cmp-d0',...past.map((c,j)=>'c-cmp-p'+j)]);
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+try{const r=localStorage.getItem('csm-range');if(r)range=r;const z=localStorage.getItem('csm-zoom');if(z)zoom=z}catch(e){}
+
+function cw(el){return Math.round(Math.max(320,Math.min(1400,el.clientWidth||640)))}
+function ch(W,b){return Math.round(Math.max(b*0.9,Math.min(b*1.15,W*0.42)))}
+function nice(min,max,n=5){const span=max-min,step0=span/n,mag=Math.pow(10,Math.floor(Math.log10(step0)));
+  const step=[1,2,2.5,5,10].map(x=>x*mag).find(s=>span/s<=n)||mag*10;
+  const lo=Math.floor(min/step)*step,hi=Math.ceil(max/step)*step,t=[];for(let v=lo;v<=hi+1e-9;v+=step)t.push(v);return t;}
+function xTicks(data){const n=data.length,every=n>36?12:n>18?6:3;return data.map((d,i)=>i).filter(i=>(data[i].id.slice(5)==='01'&&n>18)||(n<=18&&i%every===(n-1)%every));}
+
+function lineChart(id,data,series){
+  const el=document.getElementById(id);if(!el)return;
+  const W=cw(el),H=ch(W,260),m={l:52,r:14,t:12,b:26},iw=W-m.l-m.r,ih=H-m.t-m.b;
+  const vals=data.flatMap(d=>series.map(s=>d[s.key]));
+  let lo=Math.min(...vals),hi=Math.max(...vals);const pad=(hi-lo)*.08||1;
+  const ticks=nice(lo-pad,hi+pad,4);lo=ticks[0];hi=ticks[ticks.length-1];
+  const x=i=>m.l+(data.length<2?iw/2:i*iw/(data.length-1)), y=v=>m.t+ih-(v-lo)/(hi-lo)*ih;
+  let g=ticks.map(t=>`<line x1="${m.l}" x2="${W-m.r}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)" stroke-width="1"/>
+    <text x="${m.l-8}" y="${y(t)+3.5}" text-anchor="end">${t>=1e6?'$'+(t/1e6).toFixed(2)+'T':'$'+(t/1000).toFixed(0)+'B'}</text>`).join('');
+  g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${m.t+ih}" y2="${m.t+ih}" stroke="var(--axis)"/>`;
+  g+=xTicks(data).map(i=>`<text x="${x(i)}" y="${H-6}" text-anchor="middle">${data.length>18?data[i].id.slice(0,4):mShort(data[i].id)}</text>`).join('');
+  series.forEach(s=>{const pts=data.map((d,i)=>`${x(i).toFixed(1)},${y(d[s.key]).toFixed(1)}`);
+    if(s.area)g+=`<path d="M${pts.join('L')}L${x(data.length-1)},${m.t+ih}L${x(0)},${m.t+ih}Z" fill="var(${s.color})" opacity=".09"/>`;
+    g+=`<path d="M${pts.join('L')}" fill="none" stroke="var(${s.color})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const e=data[data.length-1];g+=`<circle cx="${x(data.length-1)}" cy="${y(e[s.key])}" r="4" fill="var(${s.color})" stroke="var(--surface)" stroke-width="2"/>`;});
+  g+=`<line id="${id}-x" y1="${m.t}" y2="${m.t+ih}" stroke="var(--axis)" stroke-dasharray="3 3" visibility="hidden"/>`;
+  g+=series.map((s,j)=>`<circle id="${id}-d${j}" r="4.5" fill="var(${s.color})" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`).join('');
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${series.map(s=>s.name).join(', ')} over time">${g}<rect x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent" id="${id}-hit"/></svg><div class="tip" hidden></div>`;
+  hover(el,id,data.length,x,W,i=>{
+    const d=data[i];document.getElementById(id+'-x').setAttribute('x1',x(i));document.getElementById(id+'-x').setAttribute('x2',x(i));
+    series.forEach((s,j)=>{const c=document.getElementById(id+'-d'+j);c.setAttribute('cx',x(i));c.setAttribute('cy',y(d[s.key]));});
+    const prev=data[i-1];
+    return `<div class="t">${mLabel(d.id)}</div>`+series.map(s=>`<div class="r"><span><i style="background:var(${s.color})"></i>${s.name}</span><b>${fmtB(d[s.key])}</b></div>`).join('')+
+      (series.length===1&&prev?`<div class="r" style="color:var(--muted)"><span>vs prior month</span><span>${sgn(pct(d[series[0].key],prev[series[0].key]))}</span></div>`:'');
+  },[id+'-x',...series.map((s,j)=>id+'-d'+j)]);
+}
+
+function contribChart(id,data){
+  const el=document.getElementById(id);if(!el||!data.length)return;
+  const W=cw(el),H=ch(W,260),m={l:40,r:10,t:12,b:26},iw=W-m.l-m.r,ih=H-m.t-m.b;
+  const segs=[['res','--s1','Residential'],['nonres','--s2','Nonresidential'],['pub','--s3','Public']];
+  let mn=0,mx=0;data.forEach(d=>{let p=0,n=0;segs.forEach(([k])=>{d[k]>0?p+=d[k]:n+=d[k]});mn=Math.min(mn,n,d.v);mx=Math.max(mx,p,d.v)});
+  const ticks=nice(mn,mx,4);const lo=ticks[0],hi=ticks[ticks.length-1];
+  const y=v=>m.t+ih-(v-lo)/(hi-lo)*ih, bw=iw/data.length, gap=Math.min(2,bw*.25), x=i=>m.l+i*bw;
+  let g=`<rect id="${id}-hl" y="${m.t}" height="${ih}" fill="var(--wash)" visibility="hidden"/>`;
+  g+=ticks.map(t=>`<line x1="${m.l}" x2="${W-m.r}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/><text x="${m.l-8}" y="${y(t)+3.5}" text-anchor="end">${t>0?'+':''}${t}%</text>`).join('');
+  data.forEach((d,i)=>{let up=0,dn=0;segs.forEach(([k,c])=>{const v=d[k];if(Math.abs(v)<1e-9)return;
+      let a,b;if(v>0){a=up;b=up+v;up=b}else{a=dn;b=dn+v;dn=b}
+      const top=y(Math.max(a,b)),h=Math.max(.5,Math.abs(y(a)-y(b)));
+      g+=`<rect x="${x(i)+gap/2}" y="${top}" width="${Math.max(1,bw-gap)}" height="${h}" fill="var(${c})" stroke="var(--surface)" stroke-width="${bw>6?1:0}"/>`});});
+  g+=`<line x1="${m.l}" x2="${W-m.r}" y1="${y(0)}" y2="${y(0)}" stroke="var(--axis)"/>`;
+  g+=data.map((d,i)=>`<circle cx="${x(i)+bw/2}" cy="${y(d.v)}" r="${Math.max(1.8,Math.min(3.5,bw/3))}" fill="var(--ink)" stroke="var(--surface)" stroke-width="1"/>`).join('');
+  const xt=xTicks(data);g+=xt.map(i=>`<text x="${x(i)+bw/2}" y="${H-6}" text-anchor="middle">${data.length>18?data[i].id.slice(0,4):mShort(data[i].id)}</text>`).join('');
+  const L=data[data.length-1];g+=`<text x="${x(data.length-1)+bw/2}" y="${L.v<0?y(L.v)+16:y(L.v)-8}" text-anchor="end" class="lbl" style="fill:var(--ink);font-weight:500">${sgn(L.v)}</text>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Year-over-year change in total spending by segment">${g}<rect x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/></svg><div class="tip" hidden></div>`;
+  const pp=v=>(v>0?'+':'')+v.toFixed(1)+' pts';
+  hover(el,id,data.length,i=>x(i)+bw/2,W,i=>{const hl=document.getElementById(id+'-hl');hl.setAttribute('x',x(i));hl.setAttribute('width',bw);const d=data[i];
+    return `<div class="t">${mLabel(d.id)} vs. a year earlier (pts of total)</div>`+segs.map(([k,c,n])=>`<div class="r"><span><i style="background:var(${c})"></i>${n}</span><span>${pp(d[k])}</span></div>`).join('')+
+      `<div class="r" style="border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>Net YoY</span><b>${sgn(d.v)}</b></div>`},[id+'-hl']);
+}
+
+function hover(el,id,n,xf,W,content,marks){
+  const svg=el.querySelector('svg'),tip=el.querySelector('.tip');
+  const show=v=>marks.forEach(mk=>document.getElementById(mk)?.setAttribute('visibility',v));
+  svg.addEventListener('pointermove',e=>{
+    const r=svg.getBoundingClientRect(),sx=(e.clientX-r.left)*W/r.width;
+    let best=0,bd=1e9;for(let i=0;i<n;i++){const d=Math.abs(xf(i)-sx);if(d<bd){bd=d;best=i}}
+    tip.innerHTML=content(best);tip.hidden=false;show('visible');
+    const px=xf(best)*r.width/W,tw=tip.offsetWidth;
+    tip.style.left=Math.max(0,Math.min(r.width-tw,px+(px>r.width/2?-tw-12:12)))+'px';tip.style.top='8px';
+  });
+  svg.addEventListener('pointerleave',()=>{tip.hidden=true;show('hidden')});
+}
+
+render();
+</script>
+</body>
+</html>
