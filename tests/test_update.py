@@ -21,9 +21,13 @@ def page():
     return copy.deepcopy(data), copy.deepcopy(notes), u.parse_block(hist_line)
 
 
+def sheet_rows():
+    """Every cell of the real release.xlsx sheet 'Table1' (Aug 2026 release)."""
+    return json.loads((FIX / "release_xlsx_table1.json").read_text(encoding="utf-8"))["rows"]
+
+
 def table1_aug():
-    fx = json.loads((FIX / "table1_aug2026_from_brief.json").read_text(encoding="utf-8"))
-    return u.table1_from_rows(fx["cols"], [tuple(r) for r in fx["rows"]])
+    return u.table1_from_sheet(sheet_rows())
 
 
 # --- page -------------------------------------------------------------------
@@ -85,31 +89,72 @@ def test_table1_mapping_matches_page(page):
 
 
 def test_table1_uses_block_not_first_match():
-    # "Residential" first appears in the Total block (null values there); the Private one must win.
+    # "Residential", "Office", "Power", "Educational" and others appear in more than one block.
     t1 = table1_aug()
-    assert t1.get("res", "2026-08") == 882270
+    assert t1.get("res", "2026-08") == 882270          # private, not 894,597 (Total block)
+    assert t1.get("office", "2026-08") == 134119       # private, not 150,669 (Total) or 16,550 (Public)
+    assert t1.get("educational", "2026-08") == 113073  # public, not 137,469 (Total) or 24,396 (Private)
+    assert t1.get("mfg", "2026-08") == 168209          # private, not 170,701 (Total)
 
 
-def test_footnote_digits():
+def test_footnote_digits_and_padding():
     assert u.clean_label("Residential2") == "Residential"
     assert u.clean_label("Total Private Construction1") == "Total Private Construction"
     assert u.clean_label("  Total Public Construction3 ") == "Total Public Construction"
-    assert u.clean_label("Office") == "Office"
+    assert u.clean_label("    Manufacturing ") == "Manufacturing"
     assert u.clean_label("Power2") == "Power2"  # only the four known footnoted labels
 
 
+def test_table1_xlsx_and_pdf_agree():
+    x = table1_aug()
+    p = u.table1_from_pdf_text((FIX / "release_pdf_table1.txt").read_text(encoding="utf-8"))
+    assert (x.cols, x.values) == (p.cols, p.values)
+    assert x.source == "release.xlsx" and p.source == "release.pdf"
+
+
+def test_table1_xlsx_bytes_round_trip(tmp_path):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Table1"
+    for r in sheet_rows():
+        ws.append(r)
+    wb.save(tmp_path / "release.xlsx")
+    t1 = u.read_table1_xlsx((tmp_path / "release.xlsx").read_bytes())
+    assert t1.values == table1_aug().values
+
+
 def test_table1_missing_row_fails():
-    fx = json.loads((FIX / "table1_aug2026_from_brief.json").read_text(encoding="utf-8"))
-    rows = [r for r in fx["rows"] if r[0] != "Commercial"]
-    with pytest.raises(u.CheckFailed, match="commercial"):
-        u.table1_from_rows(fx["cols"], rows)
+    rows = [r for r in sheet_rows() if not (isinstance(r[0], str) and r[0].strip() == "Commercial")]
+    with pytest.raises(u.SourceError, match="commercial"):
+        u.table1_from_sheet(rows)
 
 
 def test_table1_duplicate_label_in_block_fails():
-    fx = json.loads((FIX / "table1_aug2026_from_brief.json").read_text(encoding="utf-8"))
-    rows = fx["rows"] + [["Educational", [1] * 6]]  # second Educational in the Public block
-    with pytest.raises(u.CheckFailed, match="twice"):
-        u.table1_from_rows(fx["cols"], rows)
+    rows = sheet_rows()
+    i = max(i for i, r in enumerate(rows) if isinstance(r[0], str) and r[0].strip() == "Educational") + 1
+    rows.insert(i, ["    Educational", 1, 1, 1, 1, 1, 1, 0.0, 0.0])  # second Educational in the Public block
+    with pytest.raises(u.SourceError, match="twice"):
+        u.table1_from_sheet(rows)
+
+
+def test_broken_xlsx_falls_back_to_pdf(monkeypatch):
+    pdf_text = (FIX / "release_pdf_table1.txt").read_text(encoding="utf-8")
+    monkeypatch.setattr(u, "fetch", lambda url, **kw: url.encode())
+    monkeypatch.setattr(u, "read_table1_xlsx", lambda b: u.table1_from_sheet(sheet_rows()[:20]))  # rows missing
+    monkeypatch.setattr(u, "read_table1_pdf", lambda b: u.table1_from_pdf_text(pdf_text))
+    said = []
+    t1 = u.get_table1(said.append)
+    assert t1.source == "release.pdf" and "failed" in said[0]
+
+
+def test_table1_bad_columns_fail():
+    rows = sheet_rows()
+    h = next(i for i, r in enumerate(rows) if r[0] and r[0].strip() == "Type of Construction")
+    rows[h] = list(rows[h])
+    rows[h][3] = "May\n2026r"  # Jun column relabelled: months no longer consecutive
+    with pytest.raises(u.SourceError, match="column months"):
+        u.table1_from_sheet(rows)
 
 
 def test_private_tie_check():
@@ -273,12 +318,98 @@ def test_fred_parse_and_compare(page):
     assert "FRED agreed" in res.note["points"][-1]
 
 
-def test_unverified_readers_refuse():
-    for fn in (u.read_table1_xlsx, u.read_table1_pdf, u.parse_release_text, u.parse_schedule):
-        with pytest.raises(u.LayoutNotVerified):
-            fn(b"")
-    with pytest.raises(u.LayoutNotVerified):
-        u.read_timeseries({})
+# --- release text, schedule, time series (real Aug 2026 files) ------------------
+
+RELEASE_HTML = (FIX / "release_text_aug2026.html").read_text(encoding="utf-8")
+
+
+def test_release_text():
+    rt = u.parse_release_text(RELEASE_HTML)
+    assert (rt.month, rt.released) == ("2026-08", dt.date(2026, 10, 1))
+    assert rt.total == u.Change(2203.1, 0.9, False)
+    assert rt.yoy == u.Change(2242.0, -1.7, True)
+    assert (rt.ytd_months, rt.ytd_cur_b, rt.ytd_prior_b) == (8, 1450.4, 1496.6)
+    assert rt.res == u.Change(882.3, 1.1, False)
+    assert rt.nonres == u.Change(773.0, 1.0, True)
+    assert rt.pub == u.Change(547.8, 0.2, False)
+
+
+def test_release_text_matches_stored_flags(page):
+    data, _, _ = page
+    rt = u.parse_release_text(RELEASE_HTML)
+    assert {"total": rt.total.significant, "res": rt.res.significant, "nonres": rt.nonres.significant,
+            "pub": rt.pub.significant} == data["latest"]["moe"]
+    assert (rt.ytd_cur_b, rt.ytd_prior_b) == (data["latest"]["ytd"]["cur"], data["latest"]["ytd"]["prior"])
+    u.check_against_text(table1_aug(), rt)
+
+
+def test_release_text_private_sentence_only_in_private_section():
+    # Moving the residential sentence into the Public section must not be accepted.
+    i = RELEASE_HTML.index("Residential construction was at")
+    j = RELEASE_HTML.index("revised July estimate of $872.7 billion.") + len("revised July estimate of $872.7 billion.")
+    sentence = RELEASE_HTML[i:j]
+    moved = RELEASE_HTML[:i] + RELEASE_HTML[j:]
+    k = moved.index("Educational construction was at")
+    moved = moved[:k] + sentence + " " + moved[k:]
+    with pytest.raises(u.SourceError, match="private residential"):
+        u.parse_release_text(moved)
+
+
+def test_release_text_missing_sentence_fails():
+    with pytest.raises(u.SourceError, match="public"):
+        u.parse_release_text(RELEASE_HTML.replace("In August, the estimated", "In August the estimated"))
+
+
+def test_schedule():
+    sched = u.parse_schedule((FIX / "schedule_2026.html").read_text(encoding="utf-8"))
+    assert sched[:4] == [("2026-09", dt.date(2026, 11, 2)), ("2026-10", dt.date(2026, 12, 1)),
+                         ("2026-11", dt.date(2027, 1, 4)), ("2026-12", dt.date(2027, 2, 1))]
+    assert sched[4] == ("2027-01", dt.date(2027, 3, 1)) and sched[-1] == ("2027-10", dt.date(2027, 12, 1))
+    assert u.next_release(sched, "2026-08") == "Nov 2, 2026 (Sep data)"
+
+
+def ts_sheets():
+    fx = json.loads((FIX / "timeseries.json").read_text(encoding="utf-8"))
+    return {"total": fx["totsatime"]["rows"], "private": fx["privsatime"]["rows"], "public": fx["pubsatime"]["rows"]}
+
+
+def test_timeseries_matches_page(page):
+    data, _, _ = page
+    ts = u.timeseries_from_rows(ts_sheets())
+    assert max(ts) == "2026-08"
+    for r in data["months"]:
+        assert [ts[r[0]][f] for f in u.FIELDS] == r[1:], r[0]
+
+
+def test_timeseries_cross_check_fails_on_disagreement():
+    sheets = ts_sheets()
+    row = next(r for r in sheets["private"] if r[0] == "Jul-26r")
+    row[2] += 1  # private residential, July
+    with pytest.raises(u.SourceError, match="differ for 2026-07"):
+        u.timeseries_from_rows(sheets)
+
+
+def test_ts_header_and_month():
+    assert u.ts_header("Total\n_x000D_Construction1") == "Total Construction"
+    assert u.ts_header("Residential (inc. Improvements)2") == "Residential (inc. Improvements)"
+    assert (u.ts_month("Aug-26p"), u.ts_month("Jan-93"), u.ts_month("p Preliminary r Revised")) == ("2026-08", "1993-01", None)
+
+
+def test_full_run_on_real_files_with_august_removed(page):
+    """Rebuild August from the real files on a page that stops at July: must reproduce the stored August."""
+    data, notes, hist = page
+    stored = copy.deepcopy(data)
+    data["months"] = data["months"][:-1]
+    data["latest"]["month"] = "2026-07"
+    notes = [n for n in notes if n["id"] != "2026-08"]
+    t1, rt = table1_aug(), u.parse_release_text(RELEASE_HTML)
+    ts = u.timeseries_from_rows(ts_sheets())
+    sched = u.parse_schedule((FIX / "schedule_2026.html").read_text(encoding="utf-8"))
+    res = u.build_update(data, notes, hist, t1, rt, ts, sched, None)
+    assert res.data["months"] == stored["months"] and res.revisions == [] and res.added == ["2026-08"]
+    for k in ("month", "status", "released", "next", "moe", "ytd", "sectors"):
+        assert res.data["latest"][k] == stored["latest"][k], k
+    assert res.note["headline"] == "Total $2,203.1B, +0.9% m/m (not significant), −1.7% y/y"
 
 
 def test_no_personal_information_in_repo():

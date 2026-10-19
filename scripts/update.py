@@ -64,10 +64,6 @@ class SourceError(Exception):
     """A source could not be fetched or read."""
 
 
-class LayoutNotVerified(SourceError):
-    """The reader for this file is not written yet: its real layout has not been inspected."""
-
-
 # ---------------------------------------------------------------------------
 # Fetching
 
@@ -270,7 +266,7 @@ def table1_from_rows(cols: list[str], rows: list[tuple[str, list]], source: str 
     `rows` is [(label, [one value per column]), ...] in table order, as a reader extracts them.
     """
     if len(cols) != 6:
-        raise CheckFailed(f"Table 1: expected 6 value columns, got {len(cols)}")
+        raise SourceError(f"Table 1: expected 6 value columns, got {len(cols)}")
     block = None
     found: dict[str, list] = {}
     for label, vals in rows:
@@ -281,25 +277,102 @@ def table1_from_rows(cols: list[str], rows: list[tuple[str, list]], source: str 
         if key is None:
             continue
         if key in found:
-            raise CheckFailed(f"Table 1: label {lab!r} appears twice in the {block} block")
+            raise SourceError(f"Table 1: label {lab!r} appears twice in the {block} block")
         if len(vals) != 6:
-            raise CheckFailed(f"Table 1: row {lab!r} has {len(vals)} values, expected 6")
+            raise SourceError(f"Table 1: row {lab!r} has {len(vals)} values, expected 6")
         found[key] = list(vals)
     missing = sorted(set(TABLE1_ROWS.values()) - set(found))
     if missing:
-        raise CheckFailed(f"Table 1: rows not found: {missing}")
+        raise SourceError(f"Table 1: rows not found: {missing}")
     for k in ("total", "private_total", "res", "nonres", "mfg", "pub"):
         if any(not isinstance(v, int) for v in found[k][:5]):
-            raise CheckFailed(f"Table 1: row {k} has non-integer values in the recent months")
+            raise SourceError(f"Table 1: row {k} has non-integer values in the recent months")
     return Table1(cols=list(cols), values=found, source=source)
 
 
+TABLE1_TITLE = "Table 1. Value of Construction Put in Place in the United States, Seasonally Adjusted Annual Rate"
+MONTH_ABBR = {a: i for i, a in enumerate(calendar.month_abbr) if a}
+MONTH_NAME = {n: i for i, n in enumerate(calendar.month_name) if n}
+
+
+def table1_columns(heads: list[str]) -> list[str]:
+    """['Aug 2026p', 'Jul 2026r', ...] -> month ids; checks 5 consecutive months plus the year-ago month."""
+    cols = []
+    for h in heads:
+        m = re.fullmatch(r"([A-Z][a-z]{2}) (\d{4})([pr]?)", " ".join(str(h).split()))
+        if not m or m.group(1) not in MONTH_ABBR:
+            raise SourceError(f"Table 1: unexpected column heading {h!r}")
+        cols.append(f"{m.group(2)}-{MONTH_ABBR[m.group(1)]:02d}")
+    if len(cols) != 6 or cols[1:5] != [month_add(cols[0], -i) for i in range(1, 5)] or cols[5] != month_add(cols[0], -12):
+        raise SourceError(f"Table 1: unexpected column months {cols}")
+    return cols
+
+
+def table1_from_sheet(rows: list[list]) -> Table1:
+    """release.xlsx sheet 'Table1': title in A1, headings in the row whose A cell is 'Type of Construction'
+    (cells like 'Aug\\n2026p' in B..G, percent changes in H..I), then one row per category."""
+    if not rows or str(rows[0][0]).strip() != TABLE1_TITLE:
+        raise SourceError("release.xlsx: Table1 title not found in A1")
+    hi = next((i for i, r in enumerate(rows) if r and " ".join(str(r[0]).split()) == "Type of Construction"), None)
+    if hi is None:
+        raise SourceError("release.xlsx: 'Type of Construction' heading row not found")
+    cols = table1_columns(rows[hi][1:7])
+    out = []
+    for r in rows[hi + 1:]:
+        vals = list(r[1:7]) + [None] * (6 - len(r[1:7]))
+        if isinstance(r[0], str) and all(isinstance(v, int) for v in vals):
+            out.append((r[0], vals))
+    return table1_from_rows(cols, out, "release.xlsx")
+
+
 def read_table1_xlsx(content: bytes) -> Table1:
-    raise LayoutNotVerified("release.xlsx reader not written: layout not yet inspected")
+    import io
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        ws = wb["Table1"]
+    except Exception as e:  # not a workbook, or no Table1 sheet
+        raise SourceError(f"release.xlsx: {e}")
+    return table1_from_sheet([list(r) for r in ws.iter_rows(values_only=True)])
+
+
+PDF_ROW = re.compile(r"(?P<label>\S.*?) (?P<vals>(?:\d{1,3}(?:,\d{3})* ){5}\d{1,3}(?:,\d{3})*) \S+ \S+")
+
+
+def table1_from_pdf_text(text: str) -> Table1:
+    """pdfplumber text of the Table 1 page: headings split over two lines
+    ('Type of Construction Aug Jul ...' then '2026p 2026r ...'), then 'Label 2,203,129 ... 0.9 -1.7'."""
+    lines = [" ".join(l.split()) for l in text.splitlines()]
+    if not lines or lines[0] != TABLE1_TITLE:
+        raise SourceError("release.pdf: Table 1 title not found")
+    hi = next((i for i, l in enumerate(lines) if l.startswith("Type of Construction ")), None)
+    if hi is None or hi + 1 >= len(lines):
+        raise SourceError("release.pdf: heading line not found")
+    names = lines[hi].split()[3:9]
+    years = lines[hi + 1].split()[:6]
+    cols = table1_columns([f"{n} {y}" for n, y in zip(names, years)])
+    rows = []
+    for l in lines[hi + 2:]:
+        if l.startswith("p Preliminary"):
+            break
+        m = PDF_ROW.fullmatch(l)
+        if m:
+            rows.append((m.group("label"), [int(v.replace(",", "")) for v in m.group("vals").split()]))
+    return table1_from_rows(cols, rows, "release.pdf")
 
 
 def read_table1_pdf(content: bytes) -> Table1:
-    raise LayoutNotVerified("release.pdf reader not written: layout not yet inspected")
+    import io
+    import pdfplumber
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            texts = [p.extract_text() or "" for p in pdf.pages]
+    except Exception as e:
+        raise SourceError(f"release.pdf: {e}")
+    page = next((t for t in texts if t.startswith(TABLE1_TITLE)), None)
+    if page is None:
+        raise SourceError("release.pdf: no page starts with the Table 1 title")
+    return table1_from_pdf_text(page)
 
 
 # ---------------------------------------------------------------------------
@@ -326,18 +399,207 @@ class ReleaseText:
     pub: Change
 
 
-def parse_release_text(html: bytes) -> ReleaseText:
-    raise LayoutNotVerified("release text parser not written: raw HTML not yet inspected")
+def visible_text(html: bytes | str) -> str:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    for t in soup(["script", "style", "noscript"]):
+        t.decompose()
+    return " ".join(soup.get_text(" ").split())
 
 
-def parse_schedule(html: bytes) -> list[tuple[str, dt.date]]:
-    """[(reporting month YYYY-MM, release date)]."""
-    raise LayoutNotVerified("release schedule parser not written: page not yet inspected")
+NUMBER_WORDS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve".split())}
+B = r"\$([\d,]+\.\d) billion"
+# "0.9 percent (±1.0 percent)* above": the asterisk (plain '*') marks a change that is not significant
+CHG = r"(\d+\.\d) percent \(±(\d+\.\d) percent\)\s?(\*?)\s?(above|below)"
+
+
+def _change(level: str, p: str, star: str, direction: str) -> Change:
+    v = float(p)
+    return Change(float(level.replace(",", "")), v if direction == "above" else -v, star != "*")
+
+
+def _one(pattern: str, text: str, what: str) -> re.Match:
+    found = list(re.finditer(pattern, text))
+    if len(found) != 1:
+        raise SourceError(f"release text: {what} sentence found {len(found)} times")
+    return found[0]
+
+
+def parse_release_text(html: bytes | str) -> ReleaseText:
+    """The current release page, read as visible text. Sentences are matched only inside their section."""
+    text = visible_text(html)
+    rel = re.search(r"FOR IMMEDIATE RELEASE: [A-Z][a-z]+day, ([A-Z][a-z]+ \d{1,2}, \d{4})", text)
+    title = re.search(r"Monthly Construction Spending, ([A-Z][a-z]+) (\d{4})", text)
+    if not rel or not title or title.group(1) not in MONTH_NAME:
+        raise SourceError("release text: release line or page heading not found")
+    released = dt.datetime.strptime(rel.group(1), "%B %d, %Y").date()
+    mon, year = title.group(1), int(title.group(2))
+    month = f"{year}-{MONTH_NAME[mon]:02d}"
+    prev_mon = calendar.month_name[int(month_add(month, -1)[5:])]
+
+    i_tot = text.find("Total Construction", title.end())
+    i_priv = text.find("Private Construction", i_tot + 1)
+    i_pub = text.find("Public Construction", i_priv + 1)
+    if min(i_tot, i_priv, i_pub) < 0:
+        raise SourceError("release text: section headings not found")
+    i_end = text.find("Additional Release Materials", i_pub)
+    total_s, priv_s, pub_s = text[i_tot:i_priv], text[i_priv:i_pub], text[i_pub:i_end if i_end > 0 else None]
+
+    m = _one(rf"Construction spending during {mon} {year} was estimated at a seasonally adjusted annual rate "
+             rf"of {B}, {CHG} the revised {prev_mon} estimate of {B}\.", total_s, "total")
+    total = _change(m.group(1), m.group(2), m.group(4), m.group(5))
+    m = _one(rf"The {mon} figure is {CHG} the {mon} {year - 1} estimate of {B}\.", total_s, "year-over-year")
+    yoy = _change(m.group(5), m.group(1), m.group(3), m.group(4))
+    m = _one(rf"During the first ([a-z]+) months of this year, construction spending amounted to {B}, {CHG} "
+             rf"the {B} for the same period in {year - 1}\.", total_s, "year-to-date")
+    if m.group(1) not in NUMBER_WORDS:
+        raise SourceError(f"release text: unknown month count {m.group(1)!r}")
+    ytd_months, ytd_cur, ytd_prior = NUMBER_WORDS[m.group(1)], float(m.group(2).replace(",", "")), float(m.group(7).replace(",", ""))
+
+    def private(kind):
+        m = _one(rf"(?<![A-Za-z]){kind} construction was at a seasonally adjusted annual rate of {B} in {mon}, "
+                 rf"{CHG} the revised", priv_s, f"private {kind.lower()}")
+        return _change(m.group(1), m.group(2), m.group(4), m.group(5))
+    m = _one(rf"In {mon}, the estimated seasonally adjusted annual rate of public construction spending was {B}, "
+             rf"{CHG} the revised", pub_s, "public")
+    pub = _change(m.group(1), m.group(2), m.group(4), m.group(5))
+    return ReleaseText(month=month, released=released, total=total, yoy=yoy, ytd_months=ytd_months,
+                       ytd_cur_b=ytd_cur, ytd_prior_b=ytd_prior, res=private("Residential"),
+                       nonres=private("Nonresidential"), pub=pub)
+
+
+def parse_schedule(html: bytes | str) -> list[tuple[str, dt.date]]:
+    """[(reporting month YYYY-MM, release date)] from the schedule page.
+
+    Cells are <th>. Years appear only on some cells, so the first year comes from the heading
+    'PRESS RELEASE DATES FOR 2026 & 2027'; after that a cell's own year wins, otherwise the year
+    carries forward and rolls over when the month goes back past December."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    head = re.search(r"PRESS RELEASE DATES FOR (\d{4})", " ".join(soup.get_text(" ").split()))
+    if not head:
+        raise SourceError("schedule: 'PRESS RELEASE DATES FOR <year>' heading not found")
+    table = None
+    for t in soup.find_all("table"):
+        first = t.find("tr")
+        if first and [" ".join(c.get_text(" ").split()) for c in first.find_all(["th", "td"])] == \
+                ["Reporting Period", "Release Date", "Time"]:
+            table = t
+            break
+    if table is None:
+        raise SourceError("schedule: table with Reporting Period | Release Date | Time not found")
+    names = "|".join(calendar.month_name[1:])
+    py = ry = int(head.group(1))
+    pm_prev = rm_prev = None
+    out = []
+    for tr in table.find_all("tr")[1:]:
+        cells = [" ".join(c.get_text(" ").split()) for c in tr.find_all(["th", "td"])]
+        if not any(cells):
+            continue
+        p = re.fullmatch(rf"({names})(?: (\d{{4}}))?", cells[0])
+        r = re.fullmatch(rf"({names}) (\d{{1,2}})(?:, (\d{{4}}))?", cells[1]) if len(cells) > 1 else None
+        if not p or not r:
+            raise SourceError(f"schedule: unexpected row {cells}")
+        pm, rm = MONTH_NAME[p.group(1)], MONTH_NAME[r.group(1)]
+        py = int(p.group(2)) if p.group(2) else py + (1 if pm_prev and pm < pm_prev else 0)
+        ry = int(r.group(3)) if r.group(3) else ry + (1 if rm_prev and rm < rm_prev else 0)
+        pm_prev, rm_prev = pm, rm
+        period, date = f"{py}-{pm:02d}", dt.date(ry, rm, int(r.group(2)))
+        lag = (date.year * 12 + date.month) - (py * 12 + pm)
+        if not 1 <= lag <= 3:
+            raise SourceError(f"schedule: release {date} is {lag} months after {period}")
+        out.append((period, date))
+    if not out or [p for p, _ in out] != sorted({p for p, _ in out}):
+        raise SourceError("schedule: reporting periods not in order")
+    return out
+
+
+def ts_header(h) -> str:
+    """'Total\\n_x000D_Construction1' -> 'Total Construction'; drops the footnote digit."""
+    s = " ".join(str(h).replace("_x000D_", " ").split())
+    return re.sub(r"(?<=[A-Za-z)])\d$", "", s)
+
+
+TS_COLUMNS = {  # file -> {field: exact header after ts_header}
+    "total": {"total": "Total Construction", "x_private": "Total Private Construction",
+              "x_res": "Private Residential", "x_nonres": "Private Nonresidential",
+              "x_mfg": "Private Manufacturing", "x_pub": "Total Public Construction"},
+    "private": {"x_private": "Total Private Construction", "res": "Residential (inc. Improvements)",
+                "nonres": "Nonresidential", "mfg": "Manufacturing"},
+    "public": {"pub": "Total Public Construction"},
+}
+TS_TITLES = {"total": "Value of Construction Put in Place - Seasonally Adjusted Annual Rate",
+             "private": "Value of Private Construction Put in Place - Seasonally Adjusted Annual Rate",
+             "public": "Value of Public Construction Put in Place - Seasonally Adjusted Annual Rate"}
+
+
+def ts_month(cell) -> str | None:
+    """'Aug-26p' -> '2026-08'."""
+    m = re.fullmatch(r"([A-Z][a-z]{2})-(\d{2})[pr]?", str(cell).strip()) if isinstance(cell, str) else None
+    if not m or m.group(1) not in MONTH_ABBR:
+        return None
+    yy = int(m.group(2))
+    return f"{(1900 if yy >= 50 else 2000) + yy}-{MONTH_ABBR[m.group(1)]:02d}"
+
+
+def timeseries_from_rows(sheets: dict[str, list[list]]) -> dict[str, dict[str, int]]:
+    """{month: {total,res,nonres,pub,mfg}} from the three sheets' rows: title in A1, headers in the
+    row whose A cell is 'Date', then one row per month, newest first. totsatime also carries the
+    private and public columns; they must equal privsatime and pubsatime."""
+    per = {}
+    for name, cols in TS_COLUMNS.items():
+        rows = sheets[name]
+        if not rows or str(rows[0][0]).strip() != TS_TITLES[name]:
+            raise SourceError(f"time series {name}: title not found in A1")
+        hi = next((i for i, r in enumerate(rows) if r and r[0] == "Date"), None)
+        if hi is None:
+            raise SourceError(f"time series {name}: 'Date' header row not found")
+        heads = [ts_header(h) if h is not None else None for h in rows[hi]]
+        idx = {}
+        for f, label in cols.items():
+            hits = [i for i, h in enumerate(heads) if h == label]
+            if len(hits) != 1:
+                raise SourceError(f"time series {name}: header {label!r} found {len(hits)} times")
+            idx[f] = hits[0]
+        got = {}
+        for r in rows[hi + 1:]:
+            mo = ts_month(r[0]) if r else None
+            if mo is None:
+                continue
+            vals = {f: r[i] if i < len(r) else None for f, i in idx.items()}
+            if all(isinstance(v, int) for v in vals.values()):
+                if mo in got:
+                    raise SourceError(f"time series {name}: {mo} appears twice")
+                got[mo] = vals
+        if not got:
+            raise SourceError(f"time series {name}: no monthly rows")
+        per[name] = got
+    newest = {n: max(g) for n, g in per.items()}
+    if len(set(newest.values())) != 1:
+        raise SourceError(f"time series files end in different months: {newest}")
+    out = {}
+    for mo in sorted(set(per["total"]) & set(per["private"]) & set(per["public"])):
+        t, pv, pb = per["total"][mo], per["private"][mo], per["public"][mo]
+        if (t["x_private"], t["x_res"], t["x_nonres"], t["x_mfg"], t["x_pub"]) != \
+                (pv["x_private"], pv["res"], pv["nonres"], pv["mfg"], pb["pub"]):
+            raise SourceError(f"time series: totsatime and privsatime/pubsatime differ for {mo}")
+        out[mo] = {"total": t["total"], "res": pv["res"], "nonres": pv["nonres"], "pub": pb["pub"], "mfg": pv["mfg"]}
+    return out
 
 
 def read_timeseries(files: dict[str, bytes]) -> dict[str, dict[str, int]]:
     """{month: {total,res,nonres,pub,mfg}} from totsatime/privsatime/pubsatime."""
-    raise LayoutNotVerified("time series reader not written: layout not yet inspected")
+    import io
+    import openpyxl
+    sheets = {}
+    for name, content in files.items():
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            sheets[name] = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+        except Exception as e:
+            raise SourceError(f"time series {name}: {e}")
+    return timeseries_from_rows(sheets)
 
 
 def parse_fred(text: str) -> dict[str, int]:
