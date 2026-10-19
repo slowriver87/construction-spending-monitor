@@ -2,6 +2,7 @@
 import copy
 import datetime as dt
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -284,14 +285,87 @@ def test_gap_fails(page):
         u.build_update(data, notes, hist, t1, None, None, SCHEDULE, None)
 
 
-def test_without_release_text_carries_over(page):
+def test_unreadable_release_text_nulls_flags_and_ytd(page):
     data, notes, hist = page
     t1 = synthetic_sep(data)
-    res = u.build_update(data, notes, hist, t1, None, None, SCHEDULE, None)
+    res = u.build_update(data, notes, hist, t1, None, None, SCHEDULE, None,
+                         rt_error="release text: could not read public sentence (0 matches in the Public Construction section)")
+    L = res.data["latest"]
+    assert L["moe"] == {"total": None, "res": None, "nonres": None, "pub": None}
+    assert L["ytd"] is None
     assert res.note is None and res.notes == notes
-    assert res.data["latest"]["moe"] == data["latest"]["moe"]
-    assert res.data["latest"]["ytd"] == data["latest"]["ytd"]
-    assert any("carried over" in line for line in res.report)
+    assert len(res.attention) == 1 and "public sentence" in res.attention[0] and "Sep 2026" in res.attention[0]
+    u.verify_page(PAGE, u.render_page(PAGE, res.data, res.notes))
+    assert u.build_summary(res.data)["ytd_cur"] is None
+
+
+def test_page_hides_null_flags_and_ytd():
+    # The page code this relies on: a null flag shows no n.s. tag, a null ytd hides the tile.
+    js = u.extract_script(PAGE)
+    assert "const sigTag=key=>moe[key]==null?'':" in js
+    assert "${latest.ytd?k('Year to date'" in js
+
+
+def page_without_august(page, tmp_path):
+    data, notes, _ = page
+    data["months"] = data["months"][:-1]
+    data["latest"]["month"] = "2026-07"
+    pg = tmp_path / "index.html"
+    pg.write_text(u.render_page(PAGE, data, [n for n in notes if n["id"] != "2026-08"]), encoding="utf-8")
+    return pg
+
+
+def offline(monkeypatch, sources, t1, tmp_path):
+    monkeypatch.setattr(u, "fetch", lambda url, **kw: sources.get(url, b""))
+    monkeypatch.setattr(u, "fetch_once", lambda url, **kw: (_ for _ in ()).throw(u.SourceError("offline")))
+    monkeypatch.setattr(u, "read_table1_xlsx", lambda b: t1)
+    monkeypatch.setattr(u, "read_timeseries", lambda files: u.timeseries_from_rows(ts_sheets()))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out.txt"))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+
+def outputs(tmp_path):
+    return dict(l.split("=", 1) for l in (tmp_path / "out.txt").read_text().split())
+
+
+def test_run_with_unparseable_release_text_opens_issue(tmp_path, monkeypatch, page):
+    """End to end on a page that stops at July, with the real Aug 2026 files except one broken sentence."""
+    pg = page_without_august(page, tmp_path)
+    broken = RELEASE_HTML.replace("In August, the estimated", "In August the estimated")
+    offline(monkeypatch, {u.URL_RELEASE_TEXT: broken.encode(),
+                          u.URL_SCHEDULE: (FIX / "schedule_2026.html").read_bytes()}, table1_aug(), tmp_path)
+    issue = tmp_path / "issue.md"
+    assert u.run(pg, tmp_path / "summary.json", False, tmp_path / "msg.txt", issue) == 0
+    out = outputs(tmp_path)
+    assert out["changed"] == "true" and out["attention"] == "true"
+    assert "public sentence" in issue.read_text() and "Aug 2026" in issue.read_text()
+    new, new_notes, _ = u.load_page(pg.read_text(encoding="utf-8"))
+    assert new["latest"]["month"] == "2026-08" and new["latest"]["ytd"] is None
+    assert set(new["latest"]["moe"].values()) == {None}
+    assert "2026-08" not in [n["id"] for n in new_notes]
+
+
+def test_run_with_good_release_text_opens_no_issue(tmp_path, monkeypatch, page):
+    pg = page_without_august(page, tmp_path)
+    offline(monkeypatch, {u.URL_RELEASE_TEXT: RELEASE_HTML.encode(),
+                          u.URL_SCHEDULE: (FIX / "schedule_2026.html").read_bytes()}, table1_aug(), tmp_path)
+    issue = tmp_path / "issue.md"
+    assert u.run(pg, tmp_path / "summary.json", False, None, issue) == 0
+    assert outputs(tmp_path)["attention"] == "false" and not issue.exists()
+    new = u.load_page(pg.read_text(encoding="utf-8"))[0]
+    assert new["latest"]["moe"] == {"total": False, "res": False, "nonres": True, "pub": False}
+
+
+def test_run_check_failure_writes_issue_body(tmp_path, monkeypatch, page):
+    pg = page_without_august(page, tmp_path)
+    t1 = table1_aug()
+    t1.values["total"][0] += 50  # breaks the totals tie
+    offline(monkeypatch, {}, t1, tmp_path)
+    issue = tmp_path / "issue.md"
+    before = pg.read_text(encoding="utf-8")
+    assert u.run(pg, tmp_path / "summary.json", False, None, issue) == 1
+    assert pg.read_text(encoding="utf-8") == before
+    assert "check 2" in issue.read_text()
 
 
 def test_time_series_revision_and_big_move(page):
@@ -356,8 +430,91 @@ def test_release_text_private_sentence_only_in_private_section():
 
 
 def test_release_text_missing_sentence_fails():
-    with pytest.raises(u.SourceError, match="public"):
+    with pytest.raises(u.ReleaseTextError) as e:
         u.parse_release_text(RELEASE_HTML.replace("In August, the estimated", "In August the estimated"))
+    assert e.value.failed == ["public sentence (0 matches in the Public Construction section)"]
+
+
+def test_release_text_lists_every_failed_sentence():
+    html = RELEASE_HTML.replace("The August figure is", "The August number is").replace(
+        "Nonresidential construction was at", "Nonresidential spending was at")
+    with pytest.raises(u.ReleaseTextError) as e:
+        u.parse_release_text(html)
+    assert [f.split(" (")[0] for f in e.value.failed] == ["year-over-year sentence", "private nonresidential sentence"]
+
+
+# Release sentences from the archived Census press releases, Jan 2019 - Jul 2026 (real wording).
+CORPUS = json.loads((FIX / "release_sentences_2019_2026.json").read_text(encoding="utf-8"))["texts"]
+
+
+def test_every_archived_release_parses():
+    for month, text in CORPUS.items():
+        r = u.parse_release_body(text, month)
+        assert r["ytd_months"] == (None if month.endswith("-01") else int(month[5:])), month
+        assert r["total"].level_b > 1000, month
+
+
+def test_every_month_count_seen_in_archive():
+    counts = {u.parse_release_body(t, m)["ytd_months"] for m, t in CORPUS.items()}
+    assert counts == {None, *range(2, 13)}  # January has no year-to-date sentence
+
+
+def test_unchanged_and_spacing_wordings_from_archive():
+    # "nearly the same as (±1.3 percent)* the revised March estimate"
+    assert u.parse_release_body(CORPUS["2019-04"], "2019-04")["total"] == u.Change(1298.5, 0.0, False)
+    # "virtually unchanged from (±1.0 percent)* the revised July estimate"
+    assert u.parse_release_body(CORPUS["2021-08"], "2021-08")["total"] == u.Change(1584.1, 0.0, False)
+    # "(± 0.8 percent)" with a space and no asterisk: significant
+    assert u.parse_release_body(CORPUS["2023-12"], "2023-12")["total"] == u.Change(2096.0, 0.9, True)
+    # "above the November estimate", without "revised" (Dec 2025)
+    assert u.parse_release_body(CORPUS["2025-12"], "2025-12")["total"] == u.Change(2168.8, 0.3, False)
+
+
+@pytest.mark.parametrize("phrase, pct, sig", [
+    ("0.9 percent (±1.0 percent)* above", 0.9, False),
+    ("1.7 percent (±1.5 percent) below", -1.7, True),
+    ("nearly the same as (±1.3 percent)*", 0.0, False),
+    ("virtually unchanged from (±1.0 percent)*", 0.0, False),
+    ("virtually unchanged (±0.7 percent)* from", 0.0, False),   # seen in May 2022 (private total)
+    ("nearly unchanged from (±0.7 percent)", 0.0, True),        # not seen in 2019-2026; accepted as asked
+    ("nearly unchanged (± 0.7 percent) from", 0.0, True),
+])
+def test_change_phrases(phrase, pct, sig):
+    assert re.fullmatch(u.CHG, phrase)
+    assert u.parse_change("100.0", phrase) == u.Change(100.0, pct, sig)
+
+
+def test_first_month_and_twelve_months_wording():
+    jan = CORPUS["2026-01"]
+    m = re.search(r"The January figure is [^$]*\$[\d,]+\.\d billion\.", jan)
+    ytd = (" During the first month of this year, construction spending amounted to $150.2 billion, "
+           "1.0 percent (±1.5 percent) below the $151.7 billion for the same period in 2025.")
+    r = u.parse_release_body(jan[:m.end()] + ytd + jan[m.end():], "2026-01")
+    assert (r["ytd_months"], r["ytd_cur_b"], r["ytd_prior_b"]) == (1, 150.2, 151.7)
+    dec = CORPUS["2025-12"].replace(
+        "The value of construction in 2025 was", "During the first twelve months of this year, construction "
+        "spending amounted to").replace("billion spent in 2024", "billion for the same period in 2024")
+    r = u.parse_release_body(dec, "2025-12")
+    assert (r["ytd_months"], r["ytd_cur_b"], r["ytd_prior_b"]) == (12, 2164.4, 2194.8)
+
+
+def test_january_has_no_ytd_and_opens_no_issue(page):
+    data, notes, hist = page
+    t1 = synthetic_sep(data)
+    rt = text_for(t1)
+    rt.ytd_months = rt.ytd_cur_b = rt.ytd_prior_b = None  # what the parser returns for a January release
+    res = u.build_update(data, notes, hist, t1, rt, None, SCHEDULE, None)
+    assert res.data["latest"]["ytd"] is None and res.attention == []
+    assert "Year to date" not in res.note["points"][0] and res.note["points"][0].endswith("Nominal dollars.")
+
+
+def test_wrong_month_count_fails_the_ytd_check(page):
+    data, notes, hist = page
+    t1 = synthetic_sep(data)
+    rt = text_for(t1)
+    rt.ytd_months = 8
+    with pytest.raises(u.CheckFailed, match="YTD covers 8 months"):
+        u.build_update(data, notes, hist, t1, rt, None, SCHEDULE, None)
 
 
 def test_schedule():

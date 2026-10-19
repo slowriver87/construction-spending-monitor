@@ -47,7 +47,7 @@ jobs:
       - name: Fetch, check and rebuild
         id: update
         run: |
-          args=(--commit-msg "$RUNNER_TEMP/commit-msg.txt")
+          args=(--commit-msg "$RUNNER_TEMP/commit-msg.txt" --issue-body "$RUNNER_TEMP/issue-body.md")
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           python scripts/update.py "${args[@]}"
 
@@ -83,12 +83,21 @@ jobs:
           gh issue create --title "Large revision in construction spending data" --body-file "$RUNNER_TEMP/issue.md"
 
       - name: Open or comment on issue
-        if: failure() && env.DRY_RUN != 'true'
+        # A failed run (nothing committed), or a committed update whose release text could not be read
+        if: (failure() || steps.update.outputs.attention == 'true') && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TITLE: Data update needs attention
         run: |
-          echo "The scheduled data update failed. No changes were committed. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/issue.md"
+          {
+            if [ -s "$RUNNER_TEMP/issue-body.md" ]; then
+              cat "$RUNNER_TEMP/issue-body.md"
+            else
+              echo "The data update failed before its checks ran. No changes were committed."
+            fi
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/issue.md"
           num=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number,title \
                 --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty")
           if [ -n "$num" ]; then

@@ -26,6 +26,8 @@ All numbers on the page come from three one-line JavaScript objects (`DATA`, `NO
 
 The workflow commits only when something changed and every check passed. If a check fails, nothing is committed, the run fails, and an issue titled "Data update needs attention" is opened or commented on.
 
+If the release text for a new month cannot be read, the update still goes ahead from Table 1, but the significance flags and the year to date are left empty (`null`, so the page hides the "n.s." tags and the year-to-date tile), no automatic note is written, and the same issue is opened naming each sentence that could not be read. January releases have no year-to-date figure, so the year-to-date tile is hidden that month without an issue.
+
 ### Manual run
 
 Actions → Update data → Run workflow. `dry_run` defaults to true: the run fetches, parses and checks, then writes every value that would change and the automatic note to the job summary, and commits nothing.

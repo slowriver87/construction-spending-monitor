@@ -388,15 +388,23 @@ class Change:
 @dataclass
 class ReleaseText:
     month: str              # reference month, YYYY-MM
-    released: dt.date
+    released: dt.date | None
     total: Change           # m/m
     yoy: Change             # total vs year-ago
-    ytd_months: int
-    ytd_cur_b: float
-    ytd_prior_b: float
+    ytd_months: int | None  # None for January: Census publishes no year-to-date figure then
+    ytd_cur_b: float | None
+    ytd_prior_b: float | None
     res: Change
     nonres: Change
     pub: Change
+
+
+class ReleaseTextError(SourceError):
+    """One or more release sentences could not be read; `failed` names them."""
+
+    def __init__(self, failed: list[str]):
+        self.failed = failed
+        super().__init__("release text: could not read " + "; ".join(failed))
 
 
 def visible_text(html: bytes | str) -> str:
@@ -410,20 +418,90 @@ def visible_text(html: bytes | str) -> str:
 NUMBER_WORDS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve".split())}
 B = r"\$([\d,]+\.\d) billion"
-# "0.9 percent (±1.0 percent)* above": the asterisk (plain '*') marks a change that is not significant
-CHG = r"(\d+\.\d) percent \(±(\d+\.\d) percent\)\s?(\*?)\s?(above|below)"
+MOE = r"\(±\s?\d+\.\d percent\)\s?\*?"
+# How Census words a change (2019-2026 releases). An asterisk after the margin marks a change that
+# is not significant. "nearly unchanged" has not been seen but is accepted alongside the others.
+UNCHANGED = r"nearly the same|virtually unchanged|nearly unchanged"
+CHG = (rf"(\d+\.\d percent {MOE}\s?(?:above|below)"            # 0.9 percent (±1.0 percent)* above
+       rf"|(?:{UNCHANGED}) (?:as|from) {MOE}"                     # nearly the same as (±1.3 percent)*
+       rf"|(?:{UNCHANGED}) {MOE}\s?(?:as|from))")                 # virtually unchanged (±0.7 percent)* from
+MONTH_COUNT = "|".join(list(NUMBER_WORDS)[2:])
+# Section ends: the web page and the PDF put contact details after the Public section.
+SECTION_ENDS = ("Additional Release Materials", "Data Inquiries")
 
 
-def _change(level: str, p: str, star: str, direction: str) -> Change:
-    v = float(p)
-    return Change(float(level.replace(",", "")), v if direction == "above" else -v, star != "*")
+def parse_change(level: str, phrase: str) -> Change:
+    m = re.match(r"(\d+\.\d) percent", phrase)
+    if m:
+        v = float(m.group(1))
+        pct = v if phrase.endswith("above") else -v
+    else:
+        pct = 0.0
+    return Change(float(level.replace(",", "")), pct, "*" not in phrase)
 
 
-def _one(pattern: str, text: str, what: str) -> re.Match:
-    found = list(re.finditer(pattern, text))
-    if len(found) != 1:
-        raise SourceError(f"release text: {what} sentence found {len(found)} times")
-    return found[0]
+def parse_release_body(text: str, month: str) -> dict:
+    """The three sections of the release text, for data month `month`. Every sentence is looked for;
+    a ReleaseTextError lists each one that is missing or found more than once."""
+    mon, year = calendar.month_name[int(month[5:])], int(month[:4])
+    prev = calendar.month_name[int(month_add(month, -1)[5:])]
+    i_tot = text.find("Total Construction")
+    i_priv = text.find("Private Construction", i_tot + 1)
+    i_pub = text.find("Public Construction", i_priv + 1)
+    if min(i_tot, i_priv, i_pub) < 0:
+        raise ReleaseTextError(["section headings (Total, Private, Public Construction)"])
+    ends = [e for e in (text.find(s, i_pub) for s in SECTION_ENDS) if e > 0]
+    sections = {"total": text[i_tot:i_priv], "private": text[i_priv:i_pub],
+                "public": text[i_pub:min(ends) if ends else None]}
+    rev = rf"the (?:revised )?{prev} estimate of {B}"
+    patterns = {  # name: (section, pattern, required)
+        "total": ("total", rf"Construction spending during {mon} {year} was estimated at a seasonally adjusted "
+                           rf"annual rate of {B}, {CHG} {rev}\.", True),
+        "year-over-year": ("total", rf"The {mon} figure is {CHG} the {mon} {year - 1} estimate of {B}\.", True),
+        "year-to-date": ("total", rf"During the first (?:({MONTH_COUNT}) months|month) of this year, construction "
+                                  rf"spending amounted to {B}, {CHG} the {B} for the same period in {year - 1}\.", False),
+        "full-year": ("total", rf"The value of construction in {year} was {B}, {CHG} the {B} spent in {year - 1}\.", False),
+        "private residential": ("private", rf"(?<![A-Za-z])Residential construction was at a seasonally adjusted "
+                                           rf"annual rate of {B} in {mon}, {CHG} {rev}\.", True),
+        "private nonresidential": ("private", rf"Nonresidential construction was at a seasonally adjusted annual "
+                                              rf"rate of {B} in {mon}, {CHG} {rev}\.", True),
+        "public": ("public", rf"In {mon}, the estimated seasonally adjusted annual rate of public construction "
+                             rf"spending was {B}, {CHG} {rev}\.", True),
+    }
+    found, failed = {}, []
+    for name, (sec, pat, required) in patterns.items():
+        hits = list(re.finditer(pat, sections[sec]))
+        if len(hits) == 1:
+            found[name] = hits[0]
+        elif hits or required:
+            failed.append(f"{name} sentence ({len(hits)} matches in the {sec.title()} Construction section)")
+
+    # Year to date: months 2-11 use "first N months", December the full-year sentence, January has none.
+    ytd = [n for n in ("year-to-date", "full-year") if n in found]
+    if len(ytd) > 1:
+        failed.append("year-to-date sentence (both year-to-date and full-year forms found)")
+    elif not ytd and month[5:] != "01":
+        failed.append("year-to-date sentence (0 matches in the Total Construction section)")
+    if failed:
+        raise ReleaseTextError(failed)
+
+    out = {}
+    for key, name in (("total", "total"), ("res", "private residential"),
+                      ("nonres", "private nonresidential"), ("pub", "public")):
+        m = found[name]
+        out[key] = parse_change(m.group(1), m.group(2))
+    m = found["year-over-year"]
+    out["yoy"] = parse_change(m.group(2), m.group(1))
+    out["ytd_months"] = out["ytd_cur_b"] = out["ytd_prior_b"] = None
+    if "year-to-date" in found:
+        m = found["year-to-date"]
+        out.update(ytd_months=NUMBER_WORDS[m.group(1)] if m.group(1) else 1,
+                   ytd_cur_b=float(m.group(2).replace(",", "")), ytd_prior_b=float(m.group(4).replace(",", "")))
+    elif "full-year" in found:
+        m = found["full-year"]
+        out.update(ytd_months=12, ytd_cur_b=float(m.group(1).replace(",", "")),
+                   ytd_prior_b=float(m.group(3).replace(",", "")))
+    return out
 
 
 def parse_release_text(html: bytes | str) -> ReleaseText:
@@ -431,42 +509,18 @@ def parse_release_text(html: bytes | str) -> ReleaseText:
     text = visible_text(html)
     rel = re.search(r"FOR IMMEDIATE RELEASE: [A-Z][a-z]+day, ([A-Z][a-z]+ \d{1,2}, \d{4})", text)
     title = re.search(r"Monthly Construction Spending, ([A-Z][a-z]+) (\d{4})", text)
-    if not rel or not title or title.group(1) not in MONTH_NAME:
-        raise SourceError("release text: release line or page heading not found")
+    if not title or title.group(1) not in MONTH_NAME:
+        raise ReleaseTextError(["page heading 'Monthly Construction Spending, <Month> <Year>'"])
+    month = f"{title.group(2)}-{MONTH_NAME[title.group(1)]:02d}"
+    failed = [] if rel else ["release line 'FOR IMMEDIATE RELEASE: <Weekday>, <Month> <D>, <Year>'"]
+    try:
+        body = parse_release_body(text[title.end():], month)
+    except ReleaseTextError as e:
+        raise ReleaseTextError(failed + e.failed)
+    if failed:
+        raise ReleaseTextError(failed)
     released = dt.datetime.strptime(rel.group(1), "%B %d, %Y").date()
-    mon, year = title.group(1), int(title.group(2))
-    month = f"{year}-{MONTH_NAME[mon]:02d}"
-    prev_mon = calendar.month_name[int(month_add(month, -1)[5:])]
-
-    i_tot = text.find("Total Construction", title.end())
-    i_priv = text.find("Private Construction", i_tot + 1)
-    i_pub = text.find("Public Construction", i_priv + 1)
-    if min(i_tot, i_priv, i_pub) < 0:
-        raise SourceError("release text: section headings not found")
-    i_end = text.find("Additional Release Materials", i_pub)
-    total_s, priv_s, pub_s = text[i_tot:i_priv], text[i_priv:i_pub], text[i_pub:i_end if i_end > 0 else None]
-
-    m = _one(rf"Construction spending during {mon} {year} was estimated at a seasonally adjusted annual rate "
-             rf"of {B}, {CHG} the revised {prev_mon} estimate of {B}\.", total_s, "total")
-    total = _change(m.group(1), m.group(2), m.group(4), m.group(5))
-    m = _one(rf"The {mon} figure is {CHG} the {mon} {year - 1} estimate of {B}\.", total_s, "year-over-year")
-    yoy = _change(m.group(5), m.group(1), m.group(3), m.group(4))
-    m = _one(rf"During the first ([a-z]+) months of this year, construction spending amounted to {B}, {CHG} "
-             rf"the {B} for the same period in {year - 1}\.", total_s, "year-to-date")
-    if m.group(1) not in NUMBER_WORDS:
-        raise SourceError(f"release text: unknown month count {m.group(1)!r}")
-    ytd_months, ytd_cur, ytd_prior = NUMBER_WORDS[m.group(1)], float(m.group(2).replace(",", "")), float(m.group(7).replace(",", ""))
-
-    def private(kind):
-        m = _one(rf"(?<![A-Za-z]){kind} construction was at a seasonally adjusted annual rate of {B} in {mon}, "
-                 rf"{CHG} the revised", priv_s, f"private {kind.lower()}")
-        return _change(m.group(1), m.group(2), m.group(4), m.group(5))
-    m = _one(rf"In {mon}, the estimated seasonally adjusted annual rate of public construction spending was {B}, "
-             rf"{CHG} the revised", pub_s, "public")
-    pub = _change(m.group(1), m.group(2), m.group(4), m.group(5))
-    return ReleaseText(month=month, released=released, total=total, yoy=yoy, ytd_months=ytd_months,
-                       ytd_cur_b=ytd_cur, ytd_prior_b=ytd_prior, res=private("Residential"),
-                       nonres=private("Nonresidential"), pub=pub)
+    return ReleaseText(month=month, released=released, **body)
 
 
 def parse_schedule(html: bytes | str) -> list[tuple[str, dt.date]]:
@@ -649,6 +703,7 @@ class Result:
     added: list[str]
     note: dict | None
     report: list[str] = field(default_factory=list)
+    attention: list[str] = field(default_factory=list)  # reasons to open the "needs attention" issue
 
     @property
     def big_revisions(self) -> list[Revision]:
@@ -705,9 +760,9 @@ def build_note(data: dict, prev_months: dict, rt: ReleaseText, t1: Table1, hist:
     ytd = data["latest"]["ytd"]
     headline = f"Total {fmt_b(L['total'])}, {fmt_pct(mom)} m/m{ns(rt.total)}{yoy_s}"
 
-    p1 = (f"Total {fmt_b(L['total'])}, {fmt_pct(mom)} m/m{ns(rt.total)}{yoy_s}. "
-          f"Year to date ({ytd['label']}): ${ytd['cur']:,.1f}B vs ${ytd['prior']:,.1f}B "
-          f"({fmt_pct(pct(ytd['cur'], ytd['prior']))}). Nominal dollars.")
+    ytd_s = (f"Year to date ({ytd['label']}): ${ytd['cur']:,.1f}B vs ${ytd['prior']:,.1f}B "
+             f"({fmt_pct(pct(ytd['cur'], ytd['prior']))}). " if ytd else "")
+    p1 = f"Total {fmt_b(L['total'])}, {fmt_pct(mom)} m/m{ns(rt.total)}{yoy_s}. {ytd_s}Nominal dollars."
     p2 = (f"Private residential {fmt_b(L['res'])}, {fmt_pct(pct(L['res'], P['res']))} m/m{ns(rt.res)}; "
           f"private nonresidential {fmt_b(L['nonres'])}, {fmt_pct(pct(L['nonres'], P['nonres']))} m/m{ns(rt.nonres)}; "
           f"public {fmt_b(L['pub'])}, {fmt_pct(pct(L['pub'], P['pub']))} m/m{ns(rt.pub)}.")
@@ -789,7 +844,8 @@ def check_against_text(t1: Table1, rt: ReleaseText) -> None:
 
 
 def build_update(data: dict, notes: list, hist: dict, t1: Table1, rt: ReleaseText | None,
-                 ts: dict | None, schedule: list | None, fred: dict | None) -> Result | None:
+                 ts: dict | None, schedule: list | None, fred: dict | None,
+                 rt_error: str | None = None) -> Result | None:
     """Return the new DATA and NOTES, or None when Table 1 has nothing newer than the page."""
     latest = data["latest"]
     if t1.month <= latest["month"]:
@@ -839,20 +895,31 @@ def build_update(data: dict, notes: list, hist: dict, t1: Table1, rt: ReleaseTex
                sector("Highway and street", "highway"), sector("Educational", "educational")]
 
     sched_entry = dict(schedule or [])
+    attention = []
     if rt is not None:
         released = fmt_date(rt.released)
         moe = {"total": rt.total.significant, "res": rt.res.significant,
                "nonres": rt.nonres.significant, "pub": rt.pub.significant}
-        if rt.ytd_months != int(m[5:]):
-            raise CheckFailed(f"YTD covers {rt.ytd_months} months but the data month is {m}")
-        mabbr = calendar.month_abbr[int(m[5:])]
-        ytd = {"cur": round(rt.ytd_cur_b, 1), "prior": round(rt.ytd_prior_b, 1),
-               "label": f"Jan{EN_DASH}{mabbr} {m[:4]} vs Jan{EN_DASH}{mabbr} {int(m[:4]) - 1}"}
+        if rt.ytd_months is None:
+            ytd = None
+            report.append(f"No year-to-date figure: Census does not publish one for {month_full(m)}.")
+        else:
+            if rt.ytd_months != int(m[5:]):
+                raise CheckFailed(f"YTD covers {rt.ytd_months} months but the data month is {m}")
+            mabbr = calendar.month_abbr[int(m[5:])]
+            ytd = {"cur": round(rt.ytd_cur_b, 1), "prior": round(rt.ytd_prior_b, 1),
+                   "label": f"Jan{EN_DASH}{mabbr} {m[:4]} vs Jan{EN_DASH}{mabbr} {int(m[:4]) - 1}"}
     else:
+        # Never carry the previous month's flags or year to date over to a new month: null hides
+        # the n.s. tags and the year-to-date tile on the page.
         released = fmt_date(sched_entry[m]) if m in sched_entry else ""
-        moe, ytd = latest.get("moe"), latest.get("ytd")
-        report.append("Release text not read: significance flags and year to date carried over "
-                      f"from {month_abbr(latest['month'])}; no automatic note written.")
+        moe, ytd = {"total": None, "res": None, "nonres": None, "pub": None}, None
+        why = rt_error or "the release text was not read"
+        report.append(f"Release text not read ({why}): significance flags and year to date set to null; "
+                      "no automatic note written; Table 1 not checked against the release text.")
+        attention.append(f"The {month_abbr(m)} release text could not be read: {why}. The page was updated from "
+                         "Table 1 with the significance flags and year to date left empty (null), and no automatic "
+                         "note. Fill them in by hand, or fix the sentence patterns in scripts/update.py.")
     nxt = next_release(schedule, m) if schedule else ""
     if not nxt:
         report.append("Next release date not found in the schedule; left blank.")
@@ -890,7 +957,7 @@ def build_update(data: dict, notes: list, hist: dict, t1: Table1, rt: ReleaseTex
     if rt is not None:
         note = build_note(new_data, old, rt, t1, hist, revisions, checks_line)
         new_notes.append(note)
-    return Result(new_data, new_notes, m, revisions, added, note, report)
+    return Result(new_data, new_notes, m, revisions, added, note, report, attention)
 
 
 def build_summary(data: dict) -> dict:
@@ -902,7 +969,8 @@ def build_summary(data: dict) -> dict:
     return {"month": lt["month"], "status": lt["status"], "released": lt["released"], "next": lt["next"],
             "total": L[1], "mom": round(pct(L[1], P[1]), 1),
             "yoy": round(pct(L[1], Y[1]), 1) if Y else None,
-            "ytd_cur": lt["ytd"]["cur"], "ytd_prior": lt["ytd"]["prior"],
+            "ytd_cur": lt["ytd"]["cur"] if lt.get("ytd") else None,
+            "ytd_prior": lt["ytd"]["prior"] if lt.get("ytd") else None,
             "res": L[2], "nonres": L[3], "pub": L[4],
             "peak_month": tv["peak_month"], "pct_below_peak": round(100 - tv["index"], 1)}
 
@@ -967,11 +1035,18 @@ def optional(say, what, fn):
         return None
 
 
-def run(page: Path, summary_path: Path, dry_run: bool, commit_msg: Path | None) -> int:
+def write_issue_body(path: Path | None, lines: list[str]) -> None:
+    if path:
+        path.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run(page: Path, summary_path: Path, dry_run: bool, commit_msg: Path | None,
+        issue_body: Path | None = None) -> int:
     say = Report()
     say(f"## Construction spending update{' (dry run)' if dry_run else ''}")
     set_output("changed", "false")
     set_output("big_revisions", "false")
+    set_output("attention", "false")
     try:
         html = page.read_text(encoding="utf-8")
         data, notes, hist_line = load_page(html)
@@ -981,7 +1056,12 @@ def run(page: Path, summary_path: Path, dry_run: bool, commit_msg: Path | None) 
         if t1.month <= data["latest"]["month"]:
             say(f"- Nothing new: Table 1 newest month is {t1.month}.")
             return 0
-        rt = optional(say, "Release text", lambda: parse_release_text(fetch(URL_RELEASE_TEXT)))
+        rt, rt_error = None, None
+        try:
+            rt = parse_release_text(fetch(URL_RELEASE_TEXT))
+        except SourceError as e:
+            rt_error = str(e)
+            say(f"- Release text not read: {e}")
         ts = optional(say, "Time series",
                       lambda: read_timeseries({k: fetch(u) for k, u in URL_TIMESERIES.items()}))
         schedule = optional(say, "Release schedule", lambda: parse_schedule(fetch(URL_SCHEDULE)))
@@ -993,30 +1073,44 @@ def run(page: Path, summary_path: Path, dry_run: bool, commit_msg: Path | None) 
                 fred = None
                 break
 
-        res = build_update(data, notes, hist, t1, rt, ts, schedule, fred)
+        res = build_update(data, notes, hist, t1, rt, ts, schedule, fred, rt_error)
         new_html = render_page(html, res.data, res.notes)
         verify_page(html, new_html)
         if load_page(new_html)[2] != hist_line:
             raise CheckFailed("check 6: HIST changed")
     except CheckFailed as e:
         say(f"\n**Check failed, nothing written:** {e}")
+        write_issue_body(issue_body, [f"The data update failed a check and committed nothing: {e}"])
         say.write()
         return 1
 
     say("\nAll checks passed.\n")
     for line in res.report:
         say(f"- {line}")
-    say(f"\n### Changes for {month_abbr(res.month)}")
-    if res.added:
-        say("- Added months: " + ", ".join(res.added))
+    if res.attention:
+        say("\n**Needs attention (an issue will be opened):**")
+        for a in res.attention:
+            say(f"- {a}")
+    say(f"\n### Changes for {month_abbr(res.month)} (old → new)")
+    new_rows = {r[0]: r[1:] for r in res.data["months"]}
+    for mo in res.added:
+        say(f"- DATA.months {mo} [total, res, nonres, pub, mfg]: (none) → `{dump(new_rows[mo])}`")
     for r in res.revisions:
-        say(f"- Revised {r}")
+        say(f"- DATA.months revised {r}")
     if not res.revisions:
         say("- No revisions to stored months.")
-    for k in ("released", "next", "moe", "ytd", "sectorNote", "sectors"):
+    for k in dict.fromkeys([*data["latest"], *res.data["latest"]]):
         o, n = data["latest"].get(k), res.data["latest"].get(k)
         if o != n:
-            say(f"- latest.{k}: `{dump(o)}` → `{dump(n)}`")
+            if k == "sectors":
+                for so, sn in zip(o or [], n):
+                    if so != sn:
+                        say(f"- DATA.latest.sectors {sn['name']}: `{dump(so)}` → `{dump(sn)}`")
+            else:
+                say(f"- DATA.latest.{k}: `{dump(o)}` → `{dump(n)}`")
+    added_notes = [x["id"] for x in res.notes if x not in notes]
+    say(f"- NOTES: {len(notes)} → {len(res.notes)} entries" +
+        (f" (adds the automatic note for {', '.join(added_notes)})" if added_notes else "; no note added"))
     if res.note:
         say("\n### Automatic note\n")
         say(f"**{res.note['headline']}**\n")
@@ -1036,6 +1130,9 @@ def run(page: Path, summary_path: Path, dry_run: bool, commit_msg: Path | None) 
         set_output("big_revisions", "true" if res.big_revisions else "false")
     else:
         say("\nDry run: nothing written.")
+    if res.attention:
+        write_issue_body(issue_body, res.attention)
+        set_output("attention", "true")
     say.write()
     return 0
 
@@ -1046,6 +1143,7 @@ def main(argv=None) -> int:
     ap.add_argument("--page", type=Path, default=ROOT / "index.html")
     ap.add_argument("--summary", type=Path, default=ROOT / "data" / "summary.json")
     ap.add_argument("--commit-msg", type=Path, help="where to write the commit message")
+    ap.add_argument("--issue-body", type=Path, help="where to write the text for a 'needs attention' issue")
     ap.add_argument("--summary-only", action="store_true",
                     help="rewrite data/summary.json from the page and exit (no fetching)")
     a = ap.parse_args(argv)
@@ -1055,7 +1153,7 @@ def main(argv=None) -> int:
         a.summary.write_text(json.dumps(build_summary(data), ensure_ascii=False, indent=2) + "\n",
                              encoding="utf-8")
         return 0
-    return run(a.page, a.summary, a.dry_run, a.commit_msg)
+    return run(a.page, a.summary, a.dry_run, a.commit_msg, a.issue_body)
 
 
 if __name__ == "__main__":
