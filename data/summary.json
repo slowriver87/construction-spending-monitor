@@ -1,0 +1,16 @@
+{
+  "month": "2026-08",
+  "status": "preliminary",
+  "released": "Oct 1, 2026",
+  "next": "Nov 2, 2026 (Sep data)",
+  "total": 2203129,
+  "mom": 0.9,
+  "yoy": -1.7,
+  "ytd_cur": 1450.4,
+  "ytd_prior": 1496.6,
+  "res": 882270,
+  "nonres": 773010,
+  "pub": 547849,
+  "peak_month": "2025-02",
+  "pct_below_peak": 2.8
+}
